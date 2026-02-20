@@ -8,15 +8,25 @@
     "typecheck": "tsgo -p tsconfig.json",
     "lint": "oxlint .",
     "lint:fix": "oxlint . --fix",
-    "fmt": "oxfmt .",
-    "fmt:check": "oxfmt --check .",
+    "fmt": "oxfmt src package.json tsconfig.json AGENTS.md README.md SKILL.md .oxfmtrc.jsonc .oxlintrc.json",
+    "fmt:check": "oxfmt --check src package.json tsconfig.json AGENTS.md README.md SKILL.md .oxfmtrc.jsonc .oxlintrc.json",
     "//2": "=== Bundled Checks ===",
     "check:fast": "bun run lint && bun run fmt:check",
     "check": "bun run typecheck && bun run lint && bun run fmt:check",
     "//3": "=== Convenience ===",
     "fix": "bun run lint:fix && bun run fmt",
     "bench": "bash scripts/bench.sh",
+    "extract": "bun run src/cli.ts extract",
+    "extract:list": "bun run src/cli.ts list",
+    "extract:serve": "bun run src/cli.ts serve",
+    "bot:telegram": "bun run src/telegram-bot.ts",
+    "extract:docs": "bun run src/index.ts",
     "prepare": "husky"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "elysia": "^1.4.25",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@nkzw/oxlint-config": "^1.0.1",

@@ -1,10 +1,30 @@
-export function buildGreeting(name?: string): string {
-  if (!name) {
-    return "Hello via Bun!";
+import { runCli } from "./cli";
+
+const KNOWN_COMMANDS = new Set(["extract", "list", "serve"]);
+
+function normalizeLegacyArgs(argv: string[]): string[] {
+  const args = argv.slice(2);
+  const firstArg = args[0];
+
+  if (firstArg && KNOWN_COMMANDS.has(firstArg)) {
+    return argv;
   }
-  return `Hello via Bun, ${name}!`;
+
+  // Legacy mode: bun run src/index.ts <url?> <maxPages?>
+  const rootUrl = args[0] ?? "https://cheerio.js.org/docs/";
+  const maxPages = args[1] ?? "10";
+
+  return [
+    argv[0] ?? "bun",
+    argv[1] ?? "src/index.ts",
+    "extract",
+    rootUrl,
+    maxPages,
+  ];
 }
 
 if (import.meta.main) {
-  await Bun.write(Bun.stdout, `${buildGreeting()}\n`);
+  await runCli(normalizeLegacyArgs(process.argv));
 }
+
+export { normalizeLegacyArgs };

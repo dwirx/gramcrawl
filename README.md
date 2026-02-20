@@ -55,7 +55,47 @@ Template ini memiliki sistem pemeriksaan kualitas yang sudah diatur di `package.
   bun run check:fast
   ```
 
-```
+### 4. CLI Website Extractor
+
+Tool ini sekarang punya mode CLI modular dan history run.
+
+- **Extract halaman**
+  ```bash
+  bun run extract -- https://example.com/article --max-pages 1
+  ```
+- **Lihat history extract**
+  ```bash
+  bun run extract:list -- --limit 10
+  ```
+- **Jalankan API server (Elysia)**
+  ```bash
+  bun run extract:serve -- --port 3000
+  ```
+- **Jalankan Telegram bot**
+  ```bash
+  TELEGRAM_BOT_TOKEN=xxx bun run bot:telegram
+  ```
+
+Output disimpan per-run agar hasil sebelumnya tidak hilang:
+
+- `output/sites/<domain>/runs/<run-id>/extract.json`
+- `output/sites/<domain>/runs/<run-id>/markdown/*.md`
+- `output/sites/<domain>/runs/<run-id>/text/*.txt`
+- `output/sites/<domain>/runs-manifest.json`
+- `output/sites/<domain>/latest.json`
+- `output/runs-manifest.json` (gabungan semua situs)
+
+Command Telegram bot:
+
+- `/extract <url> [maxPages]`
+- `/runs [limit]`
+- `/help`
+
+Saat `/extract` selesai, bot akan mengirim file:
+
+- `extract.json`
+- `.md`
+- `.txt`
 
 ## 📂 Struktur Direktori
 
@@ -71,4 +111,7 @@ Template ini memiliki sistem pemeriksaan kualitas yang sudah diatur di `package.
 1. **Gunakan Primitif Bun:** Lebih disukai menggunakan API bawaan Bun (`Bun.file`, `Bun.serve`) daripada modul Node.js.
 2. **Type Safety:** Hindari penggunaan `any`. Linter akan memberikan peringatan jika ditemukan.
 3. **Format Otomatis:** Pastikan editor Anda menggunakan pengaturan yang ada di `.vscode/settings.json` agar kode selalu rapi secara konsisten.
+
+```
+
 ```
