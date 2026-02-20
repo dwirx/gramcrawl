@@ -23,6 +23,8 @@ type TelegramMessage = {
 };
 
 type TelegramChatAction = "typing" | "upload_document";
+const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+const TELEGRAM_MAX_RETRIES = 3;
 
 const BotConfigSchema = z.object({
   token: z.string().min(10),
@@ -38,48 +40,73 @@ class TelegramApi {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
   }
 
-  async getUpdates(offset?: number): Promise<TelegramUpdate[]> {
-    const response = await fetch(`${this.baseUrl}/getUpdates`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        offset,
-        timeout: 30,
-        limit: 20,
-        allowed_updates: ["message"],
-      }),
-    });
+  private async requestJson<T>(
+    method: string,
+    body: Record<string, unknown> | FormData,
+  ): Promise<T> {
+    let lastError: Error | null = null;
 
-    const payload = (await response.json()) as TelegramApiResponse<
-      TelegramUpdate[]
-    >;
+    for (let attempt = 1; attempt <= TELEGRAM_MAX_RETRIES; attempt += 1) {
+      try {
+        const isForm = body instanceof FormData;
+        const response = await fetch(`${this.baseUrl}/${method}`, {
+          method: "POST",
+          headers: isForm ? undefined : { "content-type": "application/json" },
+          body: isForm ? body : JSON.stringify(body),
+          signal: AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
+        });
 
-    if (!payload.ok) {
-      throw new Error(payload.description ?? "Telegram getUpdates error");
+        const payload = (await response.json()) as TelegramApiResponse<T>;
+
+        if (payload.ok) {
+          return payload.result;
+        }
+
+        const description = payload.description ?? `Telegram ${method} error`;
+        const retryAfterMatch = description.match(/retry after (\d+)/i);
+        const retryAfterSeconds = Number(retryAfterMatch?.[1] ?? "");
+        const isRetryableDescription =
+          description.includes("Too Many Requests") ||
+          description.includes("Internal Server Error") ||
+          description.includes("Bad Gateway");
+
+        if (isRetryableDescription && attempt < TELEGRAM_MAX_RETRIES) {
+          const delay = Number.isFinite(retryAfterSeconds)
+            ? retryAfterSeconds * 1_000
+            : attempt * 800;
+          await Bun.sleep(delay);
+          continue;
+        }
+
+        throw new Error(description);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < TELEGRAM_MAX_RETRIES) {
+          await Bun.sleep(attempt * 600);
+          continue;
+        }
+      }
     }
 
-    return payload.result;
+    throw new Error(lastError?.message ?? `Telegram ${method} failed`);
+  }
+
+  async getUpdates(offset?: number): Promise<TelegramUpdate[]> {
+    return this.requestJson<TelegramUpdate[]>("getUpdates", {
+      offset,
+      timeout: 30,
+      limit: 20,
+      allowed_updates: ["message"],
+    });
   }
 
   async sendMessage(chatId: number, text: string): Promise<number> {
-    const response = await fetch(`${this.baseUrl}/sendMessage`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true,
-      }),
+    const result = await this.requestJson<TelegramMessage>("sendMessage", {
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true,
     });
-
-    const payload =
-      (await response.json()) as TelegramApiResponse<TelegramMessage>;
-
-    if (!payload.ok) {
-      throw new Error(payload.description ?? "Telegram sendMessage error");
-    }
-
-    return payload.result.message_id;
+    return result.message_id;
   }
 
   async editMessage(
@@ -87,20 +114,19 @@ class TelegramApi {
     messageId: number,
     text: string,
   ): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/editMessageText`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    try {
+      await this.requestJson<unknown>("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text,
         disable_web_page_preview: true,
-      }),
-    });
-    const payload = (await response.json()) as TelegramApiResponse<unknown>;
-
-    if (!payload.ok) {
-      throw new Error(payload.description ?? "Telegram editMessageText error");
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("message is not modified")) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -122,34 +148,17 @@ class TelegramApi {
       form.set("caption", caption);
     }
 
-    const response = await fetch(`${this.baseUrl}/sendDocument`, {
-      method: "POST",
-      body: form,
-    });
-    const payload = (await response.json()) as TelegramApiResponse<unknown>;
-
-    if (!payload.ok) {
-      throw new Error(payload.description ?? "Telegram sendDocument error");
-    }
+    await this.requestJson<unknown>("sendDocument", form);
   }
 
   async sendChatAction(
     chatId: number,
     action: TelegramChatAction,
   ): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/sendChatAction`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        action,
-      }),
+    await this.requestJson<unknown>("sendChatAction", {
+      chat_id: chatId,
+      action,
     });
-    const payload = (await response.json()) as TelegramApiResponse<unknown>;
-
-    if (!payload.ok) {
-      throw new Error(payload.description ?? "Telegram sendChatAction error");
-    }
   }
 }
 
@@ -166,22 +175,46 @@ function buildHelpMessage(): string {
 
 async function sendFilesBatch(
   api: TelegramApi,
+  logger: ReturnType<typeof createLogger>,
   chatId: number,
   title: string,
   files: string[],
-): Promise<void> {
+  onStatus?: (text: string) => Promise<void>,
+): Promise<{ sent: number; failed: number }> {
   const limitedFiles = files.slice(0, 5);
+  let sent = 0;
+  let failed = 0;
 
   for (let index = 0; index < limitedFiles.length; index += 1) {
     const path = limitedFiles[index];
     if (!path) {
       continue;
     }
-    await api.sendDocument(
-      chatId,
-      path,
-      `${title} ${index + 1}/${limitedFiles.length}`,
+    await onStatus?.(
+      `⏳ [5/5] Mengirim file ${title.toLowerCase()} ${index + 1}/${limitedFiles.length}`,
     );
+    await api.sendChatAction(chatId, "upload_document");
+    try {
+      await api.sendDocument(
+        chatId,
+        path,
+        `${title} ${index + 1}/${limitedFiles.length}`,
+      );
+      sent += 1;
+      await Bun.sleep(180);
+    } catch (error) {
+      failed += 1;
+      await logger.warn("failed to send document", {
+        chatId,
+        title,
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await api.sendMessage(
+        chatId,
+        `Gagal kirim file ${title.toLowerCase()} ${index + 1}: ${path}`,
+      );
+    }
   }
 
   if (files.length > limitedFiles.length) {
@@ -190,6 +223,8 @@ async function sendFilesBatch(
       `File ${title.toLowerCase()} terlalu banyak (${files.length}). Dikirim ${limitedFiles.length} file pertama.`,
     );
   }
+
+  return { sent, failed };
 }
 
 export async function startTelegramBot(configInput: BotConfig): Promise<void> {
@@ -251,6 +286,21 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           }
 
           if (command.kind === "extract") {
+            const safeStatusUpdate = async (
+              messageId: number,
+              textValue: string,
+            ): Promise<void> => {
+              try {
+                await api.sendChatAction(chatId, "typing");
+                await api.editMessage(chatId, messageId, textValue);
+              } catch (error) {
+                await logger.warn("status update failed", {
+                  chatId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            };
+
             await api.sendChatAction(chatId, "typing");
             const statusMessageId = await api.sendMessage(
               chatId,
@@ -287,19 +337,12 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     detail: progress.message,
                   });
 
-                  try {
-                    await api.sendChatAction(chatId, "typing");
-                    await api.editMessage(chatId, statusMessageId, statusText);
-                  } catch {
-                    // fallback kalau message tidak bisa diedit (mis. race condition)
-                    await api.sendMessage(chatId, statusText);
-                  }
+                  await safeStatusUpdate(statusMessageId, statusText);
                 },
               },
             );
 
-            await api.editMessage(
-              chatId,
+            await safeStatusUpdate(
               statusMessageId,
               "✅ Extract selesai, sedang mengirim file...",
             );
@@ -317,23 +360,47 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               ].join("\n"),
             );
 
-            await api.sendDocument(
-              chatId,
-              extraction.resultFile,
-              "Result JSON",
-            );
+            try {
+              await api.sendDocument(
+                chatId,
+                extraction.resultFile,
+                "Result JSON",
+              );
+            } catch (error) {
+              await logger.warn("failed to send result json", {
+                chatId,
+                path: extraction.resultFile,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              await api.sendMessage(
+                chatId,
+                `Gagal kirim Result JSON: ${extraction.resultFile}`,
+              );
+            }
             await api.sendChatAction(chatId, "upload_document");
-            await sendFilesBatch(
+            const markdownStats = await sendFilesBatch(
               api,
+              logger,
               chatId,
               "Markdown",
               extraction.markdownFiles,
+              (textValue) => safeStatusUpdate(statusMessageId, textValue),
             );
-            await sendFilesBatch(api, chatId, "Text", extraction.textFiles);
-            await api.editMessage(
+            const textStats = await sendFilesBatch(
+              api,
+              logger,
               chatId,
+              "Text",
+              extraction.textFiles,
+              (textValue) => safeStatusUpdate(statusMessageId, textValue),
+            );
+            await safeStatusUpdate(
               statusMessageId,
-              "✅ Semua file berhasil dikirim.",
+              [
+                "✅ [5/5] Proses selesai",
+                `File markdown terkirim: ${markdownStats.sent}, gagal: ${markdownStats.failed}`,
+                `File text terkirim: ${textStats.sent}, gagal: ${textStats.failed}`,
+              ].join("\n"),
             );
             await logger.info("extract completed", {
               chatId,

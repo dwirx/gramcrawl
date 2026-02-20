@@ -138,7 +138,7 @@ export async function fetchRenderedFallbackArticle(
 ): Promise<RenderedFallbackArticle | null> {
   const proxyUrl = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
   const response = await fetch(proxyUrl, {
-    signal: AbortSignal.timeout(45_000),
+    signal: AbortSignal.timeout(20_000),
   });
 
   if (!response.ok) {

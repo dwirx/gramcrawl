@@ -17,7 +17,7 @@ async function fetchHtml(url: string): Promise<string | null> {
         "accept-language": "en-US,en;q=0.9,id;q=0.8",
         "cache-control": "no-cache",
       },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(20_000),
     });
 
     if (!response.ok) {
@@ -72,6 +72,53 @@ function shouldQueueLink(candidateUrl: string, rootUrl: URL): boolean {
   return true;
 }
 
+function looksLikeBlockedPage(
+  page: Pick<ExtractedPage, "title" | "articleBodyText">,
+): boolean {
+  const combined = `${page.title}\n${page.articleBodyText}`.toLowerCase();
+  const markers = [
+    "just a moment",
+    "security verification",
+    "verify you are not a bot",
+    "access denied",
+    "forbidden",
+    "captcha",
+    "cloudflare",
+  ];
+
+  return markers.some((marker) => combined.includes(marker));
+}
+
+async function fetchMediumProviderHtml(url: string): Promise<string | null> {
+  const hostname = new URL(url).hostname.toLowerCase();
+  const isMediumHost =
+    hostname === "medium.com" || hostname.endsWith(".medium.com");
+
+  if (!isMediumHost) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(`https://freedium.cfd/${url}`, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
 export async function crawlCheerioDocs(
   rootUrl: string,
   maxPages: number,
@@ -106,7 +153,15 @@ export async function crawlCheerioDocs(
         );
       }
 
-      if (!extracted || extracted.articleBodyText.length < 160) {
+      const blockedByChallenge = extracted
+        ? looksLikeBlockedPage(extracted)
+        : false;
+
+      if (
+        !extracted ||
+        extracted.articleBodyText.length < 160 ||
+        blockedByChallenge
+      ) {
         const fallback = await fetchRenderedFallbackArticle(currentUrl);
 
         if (!extracted && fallback) {
@@ -130,7 +185,29 @@ export async function crawlCheerioDocs(
         }
       }
 
-      if (!extracted) {
+      const stillBlocked = extracted ? looksLikeBlockedPage(extracted) : false;
+
+      if (!extracted || stillBlocked) {
+        const mediumProviderHtml = await fetchMediumProviderHtml(currentUrl);
+
+        if (mediumProviderHtml) {
+          const mediumExtracted = extractPageFromHtml(
+            currentUrl,
+            mediumProviderHtml,
+            scopedRootUrl,
+            cheerio.load,
+          );
+
+          if (
+            !looksLikeBlockedPage(mediumExtracted) &&
+            mediumExtracted.articleBodyText.length > 160
+          ) {
+            extracted = mediumExtracted;
+          }
+        }
+      }
+
+      if (!extracted || looksLikeBlockedPage(extracted)) {
         throw new Error(
           `Gagal mengambil ${currentUrl} (blocked/no readable content)`,
         );

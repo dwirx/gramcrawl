@@ -121,7 +121,11 @@ export async function runExtraction(
   options?: ExtractOptions,
 ): Promise<ExtractResponse> {
   const report = async (step: string, message: string): Promise<void> => {
-    await options?.onProgress?.({ step, message });
+    try {
+      await options?.onProgress?.({ step, message });
+    } catch {
+      // Progress update tidak boleh menghentikan proses extract.
+    }
   };
 
   await report("init", "Menyiapkan proses extract");
