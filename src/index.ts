@@ -1,6 +1,12 @@
 import { runCli } from "./cli";
 
-const KNOWN_COMMANDS = new Set(["extract", "list", "serve"]);
+const KNOWN_COMMANDS = new Set([
+  "extract",
+  "list",
+  "serve",
+  "cookie-import",
+  "cookie-set",
+]);
 
 function normalizeLegacyArgs(argv: string[]): string[] {
   const args = argv.slice(2);

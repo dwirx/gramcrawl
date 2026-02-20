@@ -38,4 +38,29 @@ describe("parseTelegramCommand", () => {
     expect(parsed.url).toBe("https://example.com/article");
     expect(parsed.maxPages).toBe(1);
   });
+
+  test("parses /cookieimport command", () => {
+    const parsed = parseTelegramCommand("/cookieimport projectmultatuli.org");
+
+    expect(parsed.kind).toBe("cookieImport");
+    if (parsed.kind !== "cookieImport") {
+      throw new Error("Expected cookieImport command");
+    }
+
+    expect(parsed.domain).toBe("projectmultatuli.org");
+  });
+
+  test("parses /cookieset command", () => {
+    const parsed = parseTelegramCommand(
+      "/cookieset projectmultatuli.org cf_clearance=abc; __cf_bm=def",
+    );
+
+    expect(parsed.kind).toBe("cookieSet");
+    if (parsed.kind !== "cookieSet") {
+      throw new Error("Expected cookieSet command");
+    }
+
+    expect(parsed.domain).toBe("projectmultatuli.org");
+    expect(parsed.cookie).toBe("cf_clearance=abc; __cf_bm=def");
+  });
 });

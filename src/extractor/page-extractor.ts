@@ -30,6 +30,25 @@ const NOISE_TEXTS = new Set([
   "restacks",
   "like",
   "likes",
+  "masuk",
+  "buat tulisan",
+  "beranda",
+  "tentang kami",
+  "pedoman media siber",
+  "ketentuan & kebijakan privasi",
+  "panduan komunitas",
+  "peringkat penulis",
+  "cara menulis di kumparan",
+  "informasi kerja sama",
+  "bantuan",
+  "iklan",
+  "karir",
+  "instagram",
+  "facebook",
+  "tiktok",
+  "youtube",
+  "whatsapp",
+  "x",
 ]);
 
 function normalizeWhitespace(value: string): string {
@@ -54,6 +73,9 @@ function shouldSkipImage(src: string): boolean {
   const lowered = src.toLowerCase();
 
   return (
+    lowered.endsWith(".svg") ||
+    lowered.includes("/uikit-assets/assets/icons/") ||
+    lowered.includes("/uikit-assets/assets/logos/") ||
     lowered.includes("/avatars/") ||
     lowered.includes("w_32,h_32") ||
     lowered.includes("w_36,h_36") ||

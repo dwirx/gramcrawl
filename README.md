@@ -75,6 +75,14 @@ Tool ini sekarang punya mode CLI modular dan history run.
   ```bash
   TELEGRAM_BOT_TOKEN=xxx bun run bot:telegram
   ```
+- **Import cookie browser (format Netscape cookies.txt) ke .env**
+  ```bash
+  bun run src/cli.ts cookie-import projectmultatuli.org /path/to/cookies.txt
+  ```
+- **Set cookie manual ke .env**
+  ```bash
+  bun run src/cli.ts cookie-set projectmultatuli.org "cf_clearance=...; __cf_bm=..."
+  ```
 
 Output disimpan per-run agar hasil sebelumnya tidak hilang:
 
@@ -88,8 +96,17 @@ Output disimpan per-run agar hasil sebelumnya tidak hilang:
 Command Telegram bot:
 
 - `/extract <url> [maxPages]`
+- `/cookieimport <domain>` (kirim file `cookies.txt` dan pakai command ini di caption)
+- `/cookieset <domain> <cookie-header>`
 - `/runs [limit]`
 - `/help`
+
+Variabel env tambahan untuk website anti-bot:
+
+- `EXTRACT_COOKIE` untuk cookie global semua domain
+- `EXTRACT_COOKIE_MAP` untuk cookie per domain (format JSON string)
+  - contoh:
+    `EXTRACT_COOKIE_MAP="{\"projectmultatuli.org\":\"cf_clearance=...; __cf_bm=...\"}"`
 
 Saat `/extract` selesai, bot akan mengirim file:
 

@@ -40,6 +40,42 @@ describe("parseCliArgs", () => {
 
     expect(command.limit).toBe(7);
   });
+
+  test("parses cookie-import command", () => {
+    const command = parseCliArgs([
+      "bun",
+      "src/cli.ts",
+      "cookie-import",
+      "projectmultatuli.org",
+      "cookies.txt",
+    ]);
+
+    expect(command.command).toBe("cookie-import");
+    if (command.command !== "cookie-import") {
+      throw new Error("Expected cookie-import command");
+    }
+
+    expect(command.domain).toBe("projectmultatuli.org");
+    expect(command.cookiesFile).toBe("cookies.txt");
+  });
+
+  test("parses cookie-set command", () => {
+    const command = parseCliArgs([
+      "bun",
+      "src/cli.ts",
+      "cookie-set",
+      "projectmultatuli.org",
+      "cf_clearance=abc",
+    ]);
+
+    expect(command.command).toBe("cookie-set");
+    if (command.command !== "cookie-set") {
+      throw new Error("Expected cookie-set command");
+    }
+
+    expect(command.domain).toBe("projectmultatuli.org");
+    expect(command.cookie).toBe("cf_clearance=abc");
+  });
 });
 
 describe("normalizeLegacyArgs", () => {

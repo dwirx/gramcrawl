@@ -1,6 +1,8 @@
 import { ZodError } from "zod";
 import {
   CliCommandSchema,
+  CookieImportCommandSchema,
+  CookieSetCommandSchema,
   ExtractCommandSchema,
   ListCommandSchema,
   ServeCommandSchema,
@@ -62,8 +64,34 @@ export function parseCliArgs(argv: string[]): CliCommand {
     });
   }
 
+  if (command === "cookie-import") {
+    const domain = args[1];
+    const cookiesFile = args[2];
+    const envPath = getFlagValue(args, ["--env", "-e"]);
+
+    return CookieImportCommandSchema.parse({
+      command,
+      domain,
+      cookiesFile,
+      envPath,
+    });
+  }
+
+  if (command === "cookie-set") {
+    const domain = args[1];
+    const cookie = args[2];
+    const envPath = getFlagValue(args, ["--env", "-e"]);
+
+    return CookieSetCommandSchema.parse({
+      command,
+      domain,
+      cookie,
+      envPath,
+    });
+  }
+
   throw new Error(
-    `Command tidak dikenali: ${command}. Gunakan: extract | list | serve`,
+    `Command tidak dikenali: ${command}. Gunakan: extract | list | serve | cookie-import | cookie-set`,
   );
 }
 

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { runExtraction } from "../app/extract-service";
 import { readManifest } from "../app/run-store";
+import {
+  extractCookieHeaderFromNetscape,
+  writeCookieToEnv,
+} from "../cli/cookie-env";
 import { parseTelegramCommand } from "./command-parser";
 import { createLogger } from "./logger";
 
@@ -15,11 +19,22 @@ type TelegramUpdate = {
   message?: {
     chat: { id: number };
     text?: string;
+    caption?: string;
+    document?: {
+      file_id: string;
+      file_name?: string;
+      mime_type?: string;
+    };
   };
 };
 
 type TelegramMessage = {
   message_id: number;
+};
+
+type TelegramFile = {
+  file_path?: string;
+  file_size?: number;
 };
 
 type TelegramChatAction = "typing" | "upload_document";
@@ -29,6 +44,7 @@ const TELEGRAM_MAX_RETRIES = 3;
 const BotConfigSchema = z.object({
   token: z.string().min(10),
   outputRoot: z.string().default("output"),
+  envPath: z.string().default(".env"),
 });
 
 type BotConfig = z.infer<typeof BotConfigSchema>;
@@ -160,12 +176,33 @@ class TelegramApi {
       action,
     });
   }
+
+  async getFilePath(fileId: string): Promise<TelegramFile> {
+    return this.requestJson<TelegramFile>("getFile", {
+      file_id: fileId,
+    });
+  }
+
+  async downloadFileText(filePath: string): Promise<string> {
+    const url = `${this.baseUrl.replace("/bot", "/file/bot")}/${filePath}`;
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gagal download file Telegram: ${response.status}`);
+    }
+
+    return response.text();
+  }
 }
 
 function buildHelpMessage(): string {
   return [
     "Perintah bot:",
     "/extract <url> [maxPages] - ekstrak website ke JSON + Markdown",
+    "/cookieimport <domain> + upload file cookies.txt",
+    "/cookieset <domain> <cookie-header>",
     "/runs [limit] - lihat riwayat extract",
     "/help - bantuan",
     "",
@@ -253,13 +290,16 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
           const chatId = update.message?.chat.id;
           const text = update.message?.text?.trim();
+          const caption = update.message?.caption?.trim();
+          const commandInput = text || caption || "";
+          const document = update.message?.document;
 
-          if (!chatId || !text) {
+          if (!chatId || !commandInput) {
             continue;
           }
 
-          await logger.info("message received", { chatId, text });
-          const command = parseTelegramCommand(text);
+          await logger.info("message received", { chatId, text: commandInput });
+          const command = parseTelegramCommand(commandInput);
 
           if (command.kind === "help") {
             await api.sendMessage(chatId, buildHelpMessage());
@@ -411,8 +451,77 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             continue;
           }
 
+          if (command.kind === "cookieSet") {
+            await writeCookieToEnv(
+              config.envPath,
+              command.domain,
+              command.cookie,
+            );
+            await api.sendMessage(
+              chatId,
+              `Cookie untuk domain ${command.domain} tersimpan ke ${config.envPath}. Restart bot agar env terbaca ulang.`,
+            );
+            await logger.info("cookie set from command", {
+              chatId,
+              domain: command.domain,
+              envPath: config.envPath,
+            });
+            continue;
+          }
+
+          if (command.kind === "cookieImport") {
+            if (!document?.file_id) {
+              await api.sendMessage(
+                chatId,
+                "Gunakan /cookieimport <domain> sebagai caption saat upload file cookies.txt",
+              );
+              continue;
+            }
+
+            await api.sendChatAction(chatId, "typing");
+            const file = await api.getFilePath(document.file_id);
+            const filePath = file.file_path;
+
+            if (!filePath) {
+              throw new Error("Telegram file_path tidak tersedia");
+            }
+
+            const rawCookies = await api.downloadFileText(filePath);
+            const cookieHeader = extractCookieHeaderFromNetscape(
+              rawCookies,
+              command.domain,
+            );
+
+            if (!cookieHeader) {
+              throw new Error(
+                `Cookie untuk domain ${command.domain} tidak ditemukan di file`,
+              );
+            }
+
+            await writeCookieToEnv(
+              config.envPath,
+              command.domain,
+              cookieHeader,
+            );
+            await api.sendMessage(
+              chatId,
+              [
+                `Cookie domain ${command.domain} berhasil diimport.`,
+                `Tersimpan di ${config.envPath}.`,
+                "Restart bot agar environment terbaru terbaca.",
+              ].join("\n"),
+            );
+            await logger.info("cookie imported from telegram file", {
+              chatId,
+              domain: command.domain,
+              fileName: document.file_name ?? "unknown",
+              envPath: config.envPath,
+            });
+            continue;
+          }
+
           await api.sendMessage(chatId, buildHelpMessage());
-          await logger.warn("unknown command", { chatId, text });
+          await logger.warn("unknown command", { chatId, text: commandInput });
         } catch (error) {
           const chatId = update.message?.chat.id;
           await logger.error("failed to process update", error, {

@@ -6,8 +6,36 @@ import {
 } from "./rendered-fallback";
 import type { ExtractionResult, ExtractedPage } from "./types";
 
+function readCookieOverride(url: string): string {
+  const host = new URL(url).hostname.toLowerCase();
+  const globalCookie = process.env.EXTRACT_COOKIE?.trim() ?? "";
+  const mappedRaw = process.env.EXTRACT_COOKIE_MAP?.trim() ?? "";
+
+  if (!mappedRaw) {
+    return globalCookie;
+  }
+
+  try {
+    const mapped = JSON.parse(mappedRaw) as Record<string, string>;
+    const exact = mapped[host]?.trim();
+
+    if (exact) {
+      return exact;
+    }
+
+    const wildcard = Object.entries(mapped).find(([domain]) =>
+      host.endsWith(domain.replace(/^\*\./, "")),
+    )?.[1];
+
+    return wildcard?.trim() || globalCookie;
+  } catch {
+    return globalCookie;
+  }
+}
+
 async function fetchHtml(url: string): Promise<string | null> {
   try {
+    const cookie = readCookieOverride(url);
     const response = await fetch(url, {
       headers: {
         "user-agent":
@@ -16,6 +44,7 @@ async function fetchHtml(url: string): Promise<string | null> {
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "accept-language": "en-US,en;q=0.9,id;q=0.8",
         "cache-control": "no-cache",
+        ...(cookie ? { cookie } : {}),
       },
       signal: AbortSignal.timeout(20_000),
     });
@@ -87,6 +116,19 @@ function looksLikeBlockedPage(
   ];
 
   return markers.some((marker) => combined.includes(marker));
+}
+
+function buildBlockedError(url: string): Error {
+  return new Error(
+    [
+      `Gagal mengambil ${url} (blocked/no readable content).`,
+      "Kemungkinan website memakai anti-bot (Cloudflare/CAPTCHA).",
+      "Solusi: set cookie browser di .env:",
+      "EXTRACT_COOKIE='cf_clearance=...; ...'",
+      "atau domain map:",
+      `EXTRACT_COOKIE_MAP='{"projectmultatuli.org":"cf_clearance=...; ..."}'`,
+    ].join(" "),
+  );
 }
 
 async function fetchMediumProviderHtml(url: string): Promise<string | null> {
@@ -208,9 +250,7 @@ export async function crawlCheerioDocs(
       }
 
       if (!extracted || looksLikeBlockedPage(extracted)) {
-        throw new Error(
-          `Gagal mengambil ${currentUrl} (blocked/no readable content)`,
-        );
+        throw buildBlockedError(currentUrl);
       }
 
       pages.push(extracted);
@@ -222,9 +262,7 @@ export async function crawlCheerioDocs(
       }
     } catch {
       if (pages.length === 0) {
-        throw new Error(
-          `Gagal mengambil ${currentUrl} (blocked/no readable content)`,
-        );
+        throw buildBlockedError(currentUrl);
       }
       continue;
     }

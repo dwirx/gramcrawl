@@ -6,6 +6,8 @@ export type TelegramCommand =
   | { kind: "help" }
   | { kind: "runs"; limit: number }
   | { kind: "extract"; url: string; maxPages: number }
+  | { kind: "cookieImport"; domain: string }
+  | { kind: "cookieSet"; domain: string; cookie: string }
   | { kind: "unknown" };
 
 function toInt(input: string | undefined, fallback: number): number {
@@ -53,6 +55,36 @@ export function parseTelegramCommand(text: string): TelegramCommand {
       kind: "extract",
       url,
       maxPages: toInt(parts[2], 1),
+    };
+  }
+
+  if (trimmed.startsWith("/cookieimport")) {
+    const parts = trimmed.split(/\s+/);
+    const domain = parts[1]?.trim();
+
+    if (!domain) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "cookieImport",
+      domain,
+    };
+  }
+
+  if (trimmed.startsWith("/cookieset")) {
+    const parts = trimmed.split(/\s+/);
+    const domain = parts[1]?.trim();
+    const cookie = parts.slice(2).join(" ").trim();
+
+    if (!domain || !cookie) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "cookieSet",
+      domain,
+      cookie,
     };
   }
 

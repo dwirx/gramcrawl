@@ -1,4 +1,8 @@
 import { parseCliArgs, formatCliError } from "./cli/parse-args";
+import {
+  extractCookieHeaderFromNetscape,
+  writeCookieToEnv,
+} from "./cli/cookie-env";
 import { runExtraction } from "./app/extract-service";
 import { readManifest } from "./app/run-store";
 import { createApiServer } from "./app/server";
@@ -41,6 +45,45 @@ async function runCli(argv: string[]): Promise<void> {
       );
     }
 
+    return;
+  }
+
+  if (command.command === "cookie-import") {
+    const raw = await Bun.file(command.cookiesFile).text();
+    const cookie = extractCookieHeaderFromNetscape(raw, command.domain);
+
+    if (!cookie) {
+      throw new Error(
+        `Cookie tidak ditemukan untuk domain ${command.domain} di file ${command.cookiesFile}`,
+      );
+    }
+
+    const updated = await writeCookieToEnv(
+      command.envPath,
+      command.domain,
+      cookie,
+    );
+    await writeLine(
+      `Cookie domain ${updated.domain} tersimpan ke ${updated.envPath}`,
+    );
+    await writeLine(
+      `Panjang cookie: ${cookie.length} karakter. Jalankan ulang bot/CLI setelah update .env.`,
+    );
+    return;
+  }
+
+  if (command.command === "cookie-set") {
+    const updated = await writeCookieToEnv(
+      command.envPath,
+      command.domain,
+      command.cookie,
+    );
+    await writeLine(
+      `Cookie domain ${updated.domain} tersimpan ke ${updated.envPath}`,
+    );
+    await writeLine(
+      "Jalankan ulang bot/CLI agar environment terbaru terbaca oleh process.",
+    );
     return;
   }
 

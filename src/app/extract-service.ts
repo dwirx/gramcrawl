@@ -131,14 +131,14 @@ export async function runExtraction(
   await report("init", "Menyiapkan proses extract");
   const runId = buildRunId();
   const site = buildSiteFolderName(request.rootUrl);
+
+  await report("crawl", "Mengambil dan memproses konten halaman");
+  const result = await crawlCheerioDocs(request.rootUrl, request.maxPages);
   const { runDir, markdownDir, textDir } = await ensureRunDirs(
     request.outputRoot,
     site,
     runId,
   );
-
-  await report("crawl", "Mengambil dan memproses konten halaman");
-  const result = await crawlCheerioDocs(request.rootUrl, request.maxPages);
   await report("files", "Menyusun file Markdown dan Text");
   const markdownFiles = await writeArticleMarkdownFiles(result, markdownDir);
   const textFiles = await writeArticleTextFiles(result, textDir);

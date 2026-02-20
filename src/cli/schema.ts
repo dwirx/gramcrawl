@@ -21,13 +21,31 @@ export const ServeCommandSchema = z.object({
   outputRoot: z.string().default("output"),
 });
 
+export const CookieImportCommandSchema = z.object({
+  command: z.literal("cookie-import"),
+  domain: z.string().min(1),
+  cookiesFile: z.string().min(1),
+  envPath: z.string().default(".env"),
+});
+
+export const CookieSetCommandSchema = z.object({
+  command: z.literal("cookie-set"),
+  domain: z.string().min(1),
+  cookie: z.string().min(1),
+  envPath: z.string().default(".env"),
+});
+
 export const CliCommandSchema = z.discriminatedUnion("command", [
   ExtractCommandSchema,
   ListCommandSchema,
   ServeCommandSchema,
+  CookieImportCommandSchema,
+  CookieSetCommandSchema,
 ]);
 
 export type ExtractCommand = z.infer<typeof ExtractCommandSchema>;
 export type ListCommand = z.infer<typeof ListCommandSchema>;
 export type ServeCommand = z.infer<typeof ServeCommandSchema>;
+export type CookieImportCommand = z.infer<typeof CookieImportCommandSchema>;
+export type CookieSetCommand = z.infer<typeof CookieSetCommandSchema>;
 export type CliCommand = z.infer<typeof CliCommandSchema>;
