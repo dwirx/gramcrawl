@@ -35,12 +35,20 @@ export const CookieSetCommandSchema = z.object({
   envPath: z.string().default(".env"),
 });
 
+export const SubtitleCommandSchema = z.object({
+  command: z.literal("subtitle"),
+  url: z.url(),
+  lang: z.string().min(1).optional(),
+  outputRoot: z.string().default("output"),
+});
+
 export const CliCommandSchema = z.discriminatedUnion("command", [
   ExtractCommandSchema,
   ListCommandSchema,
   ServeCommandSchema,
   CookieImportCommandSchema,
   CookieSetCommandSchema,
+  SubtitleCommandSchema,
 ]);
 
 export type ExtractCommand = z.infer<typeof ExtractCommandSchema>;
@@ -48,4 +56,5 @@ export type ListCommand = z.infer<typeof ListCommandSchema>;
 export type ServeCommand = z.infer<typeof ServeCommandSchema>;
 export type CookieImportCommand = z.infer<typeof CookieImportCommandSchema>;
 export type CookieSetCommand = z.infer<typeof CookieSetCommandSchema>;
+export type SubtitleCommand = z.infer<typeof SubtitleCommandSchema>;
 export type CliCommand = z.infer<typeof CliCommandSchema>;

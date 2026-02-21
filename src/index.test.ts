@@ -76,6 +76,25 @@ describe("parseCliArgs", () => {
     expect(command.domain).toBe("projectmultatuli.org");
     expect(command.cookie).toBe("cf_clearance=abc");
   });
+
+  test("parses subtitle command", () => {
+    const command = parseCliArgs([
+      "bun",
+      "src/cli.ts",
+      "subtitle",
+      "https://www.youtube.com/watch?v=7ZdPKEf-LXA",
+      "--lang",
+      "en",
+    ]);
+
+    expect(command.command).toBe("subtitle");
+    if (command.command !== "subtitle") {
+      throw new Error("Expected subtitle command");
+    }
+
+    expect(command.url).toBe("https://www.youtube.com/watch?v=7ZdPKEf-LXA");
+    expect(command.lang).toBe("en");
+  });
 });
 
 describe("normalizeLegacyArgs", () => {

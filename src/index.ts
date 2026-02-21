@@ -2,6 +2,7 @@ import { runCli } from "./cli";
 
 const KNOWN_COMMANDS = new Set([
   "extract",
+  "subtitle",
   "list",
   "serve",
   "cookie-import",

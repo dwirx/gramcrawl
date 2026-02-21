@@ -17,6 +17,7 @@
     "fix": "bun run lint:fix && bun run fmt",
     "bench": "bash scripts/bench.sh",
     "extract": "bun run src/cli.ts extract",
+    "subtitle": "bun run src/cli.ts subtitle",
     "extract:list": "bun run src/cli.ts list",
     "extract:serve": "bun run src/cli.ts serve",
     "bot:telegram": "bun run src/telegram-bot.ts",

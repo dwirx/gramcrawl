@@ -16,6 +16,30 @@ describe("parseTelegramCommand", () => {
     expect(parsed.maxPages).toBe(2);
   });
 
+  test("parses /subtitle command", () => {
+    const parsed = parseTelegramCommand(
+      "/subtitle https://www.youtube.com/watch?v=7ZdPKEf-LXA",
+    );
+
+    expect(parsed.kind).toBe("subtitle");
+    if (parsed.kind !== "subtitle") {
+      throw new Error("Expected subtitle command");
+    }
+
+    expect(parsed.url).toBe("https://www.youtube.com/watch?v=7ZdPKEf-LXA");
+  });
+
+  test("parses /subtitletimestamp command", () => {
+    const parsed = parseTelegramCommand("/subtitletimestamp off");
+
+    expect(parsed.kind).toBe("subtitleTimestamp");
+    if (parsed.kind !== "subtitleTimestamp") {
+      throw new Error("Expected subtitleTimestamp command");
+    }
+
+    expect(parsed.action).toBe("off");
+  });
+
   test("parses /runs command with limit", () => {
     const parsed = parseTelegramCommand("/runs 5");
 

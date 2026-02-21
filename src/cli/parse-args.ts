@@ -6,6 +6,7 @@ import {
   ExtractCommandSchema,
   ListCommandSchema,
   ServeCommandSchema,
+  SubtitleCommandSchema,
   type CliCommand,
 } from "./schema";
 
@@ -90,8 +91,21 @@ export function parseCliArgs(argv: string[]): CliCommand {
     });
   }
 
+  if (command === "subtitle") {
+    const url = args[1];
+    const lang = getFlagValue(args, ["--lang", "-g"]);
+    const outputRoot = getFlagValue(args, ["--out", "-o"]);
+
+    return SubtitleCommandSchema.parse({
+      command,
+      url,
+      lang,
+      outputRoot,
+    });
+  }
+
   throw new Error(
-    `Command tidak dikenali: ${command}. Gunakan: extract | list | serve | cookie-import | cookie-set`,
+    `Command tidak dikenali: ${command}. Gunakan: extract | subtitle | list | serve | cookie-import | cookie-set`,
   );
 }
 

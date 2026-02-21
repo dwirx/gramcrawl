@@ -7,9 +7,39 @@ import {
 import { runExtraction } from "./app/extract-service";
 import { readManifest } from "./app/run-store";
 import { createApiServer } from "./app/server";
+import {
+  downloadSubtitlesAndConvert,
+  listAvailableSubtitles,
+  pickPreferredSubtitleLanguages,
+  resolveOriginalLanguage,
+} from "./subtitle/service";
 
 async function writeLine(value: string): Promise<void> {
   await Bun.write(Bun.stdout, `${value}\n`);
+}
+
+function isSubtitleTimestampEnabled(): boolean {
+  return (process.env.EXTRACT_SUBTITLE_TIMESTAMP ?? "1").trim() !== "0";
+}
+
+function renderAllLanguageCodes(
+  languages: Array<{ code: string; hasManual: boolean; hasAuto: boolean }>,
+): string {
+  if (languages.length === 0) {
+    return "-";
+  }
+
+  const rendered = languages.map((language) => {
+    const mode = language.hasManual ? "M" : language.hasAuto ? "A" : "?";
+    return `${language.code}[${mode}]`;
+  });
+
+  const limited = rendered.slice(0, 12);
+  const suffix =
+    rendered.length > limited.length
+      ? `, +${rendered.length - limited.length} lainnya`
+      : "";
+  return `${limited.join(", ")}${suffix}`;
 }
 
 async function runCli(argv: string[]): Promise<void> {
@@ -93,6 +123,67 @@ async function runCli(argv: string[]): Promise<void> {
         "Peringatan: cookie ini belum berisi cf_clearance. Untuk situs Cloudflare, extract kemungkinan tetap gagal.",
       );
     }
+    return;
+  }
+
+  if (command.command === "subtitle") {
+    if (!command.lang) {
+      const listed = await listAvailableSubtitles(command.url);
+      const resolvedOriginal = resolveOriginalLanguage(
+        listed.languages,
+        listed.originalLanguage,
+      );
+      const preferred = pickPreferredSubtitleLanguages(
+        listed.languages,
+        resolvedOriginal,
+      );
+      await writeLine(`Title: ${listed.title}`);
+      await writeLine(`Source: ${listed.webpageUrl}`);
+      await writeLine(`Extractor: ${listed.extractorKey}`);
+      await writeLine(`Original language: ${resolvedOriginal ?? "-"}`);
+
+      if (preferred.length === 0) {
+        await writeLine("Subtitle tidak tersedia.");
+        return;
+      }
+
+      await writeLine("Subtitle pilihan (original/en/id):");
+      for (const language of preferred) {
+        const mode = language.hasManual
+          ? "manual"
+          : language.hasAuto
+            ? "auto"
+            : "unknown";
+        await writeLine(`- ${language.code} (${mode})`);
+      }
+      await writeLine(
+        `Bahasa YouTube tersedia: ${renderAllLanguageCodes(listed.languages)}`,
+      );
+      if (listed.languages.length > preferred.length) {
+        await writeLine(
+          `Bahasa lain disembunyikan: ${listed.languages.length - preferred.length}`,
+        );
+      }
+      await writeLine("Gunakan --lang <kode> untuk download subtitle.");
+      return;
+    }
+
+    const downloaded = await downloadSubtitlesAndConvert(
+      command.url,
+      command.lang,
+      command.outputRoot,
+      { includeTimestamp: isSubtitleTimestampEnabled() },
+    );
+    await writeLine(`Title: ${downloaded.title}`);
+    await writeLine(`Language: ${downloaded.language}`);
+    await writeLine(`Output: ${downloaded.outputDir}`);
+    await writeLine(`SRT: ${downloaded.srtPath ?? "-"}`);
+    await writeLine(`VTT: ${downloaded.vttPath ?? "-"}`);
+    await writeLine(`TXT: ${downloaded.txtPath}`);
+    await writeLine(`MD: ${downloaded.mdPath}`);
+    await writeLine(
+      `Timestamp: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
+    );
     return;
   }
 

@@ -7,6 +7,13 @@ import {
   hasCookieName,
   writeCookieToEnv,
 } from "../cli/cookie-env";
+import {
+  downloadSubtitlesAndConvert,
+  listAvailableSubtitles,
+  pickPreferredSubtitleLanguages,
+  resolveOriginalLanguage,
+  type SubtitleLanguage,
+} from "../subtitle/service";
 import { parseTelegramCommand } from "./command-parser";
 import { createLogger } from "./logger";
 
@@ -28,6 +35,14 @@ type TelegramUpdate = {
       mime_type?: string;
     };
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: {
+      message_id: number;
+      chat: { id: number };
+    };
+  };
 };
 
 type TelegramMessage = {
@@ -40,8 +55,12 @@ type TelegramFile = {
 };
 
 type TelegramChatAction = "typing" | "upload_document";
+type TelegramInlineKeyboardMarkup = {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+};
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_MAX_RETRIES = 3;
+const SUBTITLE_SESSION_TTL_MS = 15 * 60 * 1_000;
 
 const BotConfigSchema = z.object({
   token: z.string().min(10),
@@ -50,6 +69,39 @@ const BotConfigSchema = z.object({
 });
 
 type BotConfig = z.infer<typeof BotConfigSchema>;
+type PendingSubtitleSelection = {
+  chatId: number;
+  url: string;
+  title: string;
+  languages: Set<string>;
+  createdAt: number;
+};
+const LANGUAGE_COUNTRY_MAP: Record<string, string> = {
+  ar: "SA",
+  de: "DE",
+  en: "US",
+  es: "ES",
+  fr: "FR",
+  hi: "IN",
+  hu: "HU",
+  id: "ID",
+  it: "IT",
+  iw: "IL",
+  ja: "JP",
+  ko: "KR",
+  ms: "MY",
+  my: "MM",
+  nl: "NL",
+  pl: "PL",
+  pt: "PT",
+  ro: "RO",
+  ru: "RU",
+  th: "TH",
+  tr: "TR",
+  uk: "UA",
+  vi: "VN",
+  zh: "CN",
+};
 
 class TelegramApi {
   private readonly baseUrl: string;
@@ -114,15 +166,20 @@ class TelegramApi {
       offset,
       timeout: 30,
       limit: 20,
-      allowed_updates: ["message"],
+      allowed_updates: ["message", "callback_query"],
     });
   }
 
-  async sendMessage(chatId: number, text: string): Promise<number> {
+  async sendMessage(
+    chatId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<number> {
     const result = await this.requestJson<TelegramMessage>("sendMessage", {
       chat_id: chatId,
       text,
       disable_web_page_preview: true,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
     return result.message_id;
   }
@@ -202,12 +259,24 @@ class TelegramApi {
 
     return response.text();
   }
+
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    text?: string,
+  ): Promise<void> {
+    await this.requestJson<unknown>("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {}),
+    });
+  }
 }
 
 function buildHelpMessage(): string {
   return [
     "Perintah bot:",
     "/extract <url> [maxPages] - ekstrak website ke JSON + Markdown",
+    "/subtitle <url> - tampilkan subtitle tersedia (pilih via tombol)",
+    "/subtitletimestamp <on|off|status> - kontrol timestamp di hasil subtitle MD/TXT",
     "/browser <on|off|status> - kontrol browser fallback",
     "Upload cookies.txt (tanpa command) - auto import semua domain",
     "/cookieimport <domain> + upload file cookies.txt",
@@ -217,6 +286,168 @@ function buildHelpMessage(): string {
     "",
     "Anda juga bisa kirim URL langsung tanpa command.",
   ].join("\n");
+}
+
+function subtitleButtonLabel(language: SubtitleLanguage): string {
+  const icon = languageFlagIcon(language.code);
+  if (language.hasManual && language.hasAuto) {
+    return `${icon} ${language.code} [M+A]`;
+  }
+  if (language.hasManual) {
+    return `${icon} ${language.code} [M]`;
+  }
+  if (language.hasAuto) {
+    return `${icon} ${language.code} [A]`;
+  }
+  return `${icon} ${language.code}`;
+}
+
+function buildSubtitleKeyboard(
+  sessionId: string,
+  languages: SubtitleLanguage[],
+): TelegramInlineKeyboardMarkup {
+  const rows: TelegramInlineKeyboardMarkup["inline_keyboard"] = [];
+  let currentRow: Array<{ text: string; callback_data: string }> = [];
+
+  for (const language of languages) {
+    currentRow.push({
+      text: subtitleButtonLabel(language),
+      callback_data: `subtitle:${sessionId}:${encodeURIComponent(language.code)}`,
+    });
+
+    if (currentRow.length === 2) {
+      rows.push(currentRow);
+      currentRow = [];
+    }
+  }
+
+  if (currentRow.length > 0) {
+    rows.push(currentRow);
+  }
+
+  return { inline_keyboard: rows };
+}
+
+function createSubtitleSessionId(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cleanupSubtitleSessions(
+  sessions: Map<string, PendingSubtitleSelection>,
+): void {
+  const now = Date.now();
+  for (const [sessionId, session] of sessions) {
+    if (now - session.createdAt > SUBTITLE_SESSION_TTL_MS) {
+      sessions.delete(sessionId);
+    }
+  }
+}
+
+function parseSubtitleCallbackData(
+  value: string | undefined,
+): { sessionId: string; language: string } | null {
+  if (!value || !value.startsWith("subtitle:")) {
+    return null;
+  }
+
+  const [prefix, sessionId, encodedLanguage] = value.split(":");
+  if (prefix !== "subtitle" || !sessionId || !encodedLanguage) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    language: decodeURIComponent(encodedLanguage),
+  };
+}
+
+function countryCodeToFlagEmoji(countryCode: string): string {
+  if (!/^[A-Z]{2}$/.test(countryCode)) {
+    return "🌐";
+  }
+  const codePoints = Array.from(countryCode).map(
+    (char) => 127397 + char.charCodeAt(0),
+  );
+  return String.fromCodePoint(...codePoints);
+}
+
+function languageToCountryCode(languageCode: string): string | null {
+  const normalized = languageCode.replaceAll("_", "-");
+  const segments = normalized.split("-");
+  const maybeRegion = segments.at(-1)?.toUpperCase();
+
+  if (
+    maybeRegion &&
+    /^[A-Z]{2}$/.test(maybeRegion) &&
+    maybeRegion !== segments[0]?.toUpperCase()
+  ) {
+    return maybeRegion;
+  }
+
+  const base = segments[0]?.toLowerCase();
+  if (!base) {
+    return null;
+  }
+
+  return LANGUAGE_COUNTRY_MAP[base] ?? null;
+}
+
+function languageFlagIcon(languageCode: string): string {
+  const country = languageToCountryCode(languageCode);
+  if (!country) {
+    return "🌐";
+  }
+  return countryCodeToFlagEmoji(country);
+}
+
+function renderSubtitleLanguageList(languages: SubtitleLanguage[]): string {
+  const manual = languages.filter((language) => language.hasManual);
+  const autoOnly = languages.filter(
+    (language) => !language.hasManual && language.hasAuto,
+  );
+
+  const sections: string[] = [];
+
+  if (manual.length > 0) {
+    sections.push("Prioritas 1 - Subtitle asli YouTube (manual):");
+    sections.push(
+      ...manual.map(
+        (language, index) =>
+          `${index + 1}. ${languageFlagIcon(language.code)} ${language.code}${language.hasAuto ? " (manual+auto)" : " (manual)"}`,
+      ),
+    );
+    sections.push("");
+  }
+
+  if (autoOnly.length > 0) {
+    sections.push("Prioritas 2 - Auto subtitle:");
+    sections.push(
+      ...autoOnly.map(
+        (language, index) =>
+          `${index + 1}. ${languageFlagIcon(language.code)} ${language.code} (auto)`,
+      ),
+    );
+  }
+
+  return sections.filter(Boolean).join("\n");
+}
+
+function renderAllYoutubeLanguages(languages: SubtitleLanguage[]): string {
+  if (languages.length === 0) {
+    return "-";
+  }
+
+  const rendered = languages.map((language) => {
+    const mode = language.hasManual ? "M" : language.hasAuto ? "A" : "?";
+    return `${languageFlagIcon(language.code)} ${language.code}[${mode}]`;
+  });
+
+  const limited = rendered.slice(0, 12);
+  const suffix =
+    rendered.length > limited.length
+      ? `, +${rendered.length - limited.length} lainnya`
+      : "";
+  return `${limited.join(", ")}${suffix}`;
 }
 
 function readEnvLines(content: string): string[] {
@@ -278,6 +509,28 @@ async function writeBrowserFallbackToEnv(
 
 function isBrowserFallbackEnabled(): boolean {
   return (process.env.EXTRACT_BROWSER_FALLBACK ?? "0").trim() === "1";
+}
+
+async function writeSubtitleTimestampToEnv(
+  envPath: string,
+  enabled: boolean,
+): Promise<void> {
+  const envFile = Bun.file(envPath);
+  const content = (await envFile.exists()) ? await envFile.text() : "";
+  const lines = readEnvLines(content);
+  const nextLines = upsertEnvValue(
+    lines,
+    "EXTRACT_SUBTITLE_TIMESTAMP",
+    enabled ? "1" : "0",
+  );
+  const nextContent = `${nextLines.join("\n").trimEnd()}\n`;
+
+  await Bun.write(envPath, nextContent);
+  process.env.EXTRACT_SUBTITLE_TIMESTAMP = enabled ? "1" : "0";
+}
+
+function isSubtitleTimestampEnabled(): boolean {
+  return (process.env.EXTRACT_SUBTITLE_TIMESTAMP ?? "1").trim() !== "0";
 }
 
 function buildSendFileName(path: string, fallbackBaseName: string): string {
@@ -413,10 +666,48 @@ async function sendFilesBatch(
   return { sent, failed };
 }
 
+async function sendSubtitleFiles(
+  api: TelegramApi,
+  chatId: number,
+  files: Array<string | null>,
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
+
+  for (let index = 0; index < files.length; index += 1) {
+    const path = files[index];
+    if (!path) {
+      continue;
+    }
+
+    const file = Bun.file(path);
+    if (!(await file.exists())) {
+      failed += 1;
+      continue;
+    }
+
+    try {
+      await api.sendChatAction(chatId, "upload_document");
+      await api.sendDocument(
+        chatId,
+        path,
+        undefined,
+        buildSendFileName(path, "subtitle"),
+      );
+      sent += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  return { sent, failed };
+}
+
 export async function startTelegramBot(configInput: BotConfig): Promise<void> {
   const config = BotConfigSchema.parse(configInput);
   const api = new TelegramApi(config.token);
   const logger = createLogger("telegram-bot");
+  const subtitleSessions = new Map<string, PendingSubtitleSelection>();
   let offset: number | undefined;
   const tokenHint = `${config.token.slice(0, 6)}...${config.token.slice(-4)}`;
 
@@ -436,6 +727,132 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
       for (const update of updates) {
         try {
           offset = update.update_id + 1;
+
+          cleanupSubtitleSessions(subtitleSessions);
+
+          const callback = update.callback_query;
+          if (callback) {
+            const callbackData = parseSubtitleCallbackData(callback.data);
+            if (!callbackData) {
+              await api.answerCallbackQuery(callback.id, "Aksi tidak dikenal.");
+              continue;
+            }
+
+            const callbackChatId = callback.message?.chat.id;
+            if (!callbackChatId) {
+              await api.answerCallbackQuery(
+                callback.id,
+                "Chat tidak tersedia.",
+              );
+              continue;
+            }
+
+            const session = subtitleSessions.get(callbackData.sessionId);
+            if (!session || session.chatId !== callbackChatId) {
+              await api.answerCallbackQuery(
+                callback.id,
+                "Sesi subtitle sudah expired. Jalankan /subtitle lagi.",
+              );
+              continue;
+            }
+
+            if (!session.languages.has(callbackData.language)) {
+              await api.answerCallbackQuery(callback.id, "Bahasa tidak valid.");
+              continue;
+            }
+
+            await api.answerCallbackQuery(
+              callback.id,
+              `Memproses subtitle ${callbackData.language}...`,
+            );
+            await logger.info("subtitle callback selected", {
+              chatId: callbackChatId,
+              language: callbackData.language,
+              title: session.title,
+            });
+
+            const statusMessageId = await api.sendMessage(
+              callbackChatId,
+              [
+                "⏳ [1/4] Menyiapkan subtitle",
+                `URL: ${session.url}`,
+                `Bahasa: ${callbackData.language}`,
+              ].join("\n"),
+            );
+
+            let subtitleResult;
+            try {
+              await api.editMessage(
+                callbackChatId,
+                statusMessageId,
+                [
+                  "⏳ [2/4] Mengunduh subtitle",
+                  `Judul: ${session.title}`,
+                  `Bahasa: ${callbackData.language}`,
+                ].join("\n"),
+              );
+
+              subtitleResult = await downloadSubtitlesAndConvert(
+                session.url,
+                callbackData.language,
+                config.outputRoot,
+                { includeTimestamp: isSubtitleTimestampEnabled() },
+              );
+
+              await api.editMessage(
+                callbackChatId,
+                statusMessageId,
+                [
+                  "⏳ [3/4] Mengirim file subtitle",
+                  `Judul: ${subtitleResult.title}`,
+                  `Bahasa: ${subtitleResult.language}`,
+                  `Timestamp: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
+                ].join("\n"),
+              );
+
+              const sent = await sendSubtitleFiles(api, callbackChatId, [
+                subtitleResult.srtPath,
+                subtitleResult.vttPath,
+                subtitleResult.txtPath,
+                subtitleResult.mdPath,
+              ]);
+
+              await api.editMessage(
+                callbackChatId,
+                statusMessageId,
+                [
+                  "✅ [4/4] Subtitle selesai",
+                  `Judul: ${subtitleResult.title}`,
+                  `Bahasa: ${subtitleResult.language}`,
+                  `Timestamp: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
+                  `Terkirim: ${sent.sent}`,
+                  `Gagal: ${sent.failed}`,
+                  `Folder: ${subtitleResult.outputDir}`,
+                ].join("\n"),
+              );
+              await logger.info("subtitle completed", {
+                chatId: callbackChatId,
+                title: subtitleResult.title,
+                language: subtitleResult.language,
+                sent: sent.sent,
+                failed: sent.failed,
+              });
+            } catch (error) {
+              const errorMessage =
+                error instanceof Error ? error.message : "Unknown error";
+              await api.editMessage(
+                callbackChatId,
+                statusMessageId,
+                `❌ Subtitle gagal diproses\nDetail: ${errorMessage.slice(0, 350)}`,
+              );
+              await logger.error("subtitle callback failed", error, {
+                chatId: callbackChatId,
+                language: callbackData.language,
+                url: session.url,
+              });
+            }
+            continue;
+          }
 
           const chatId = update.message?.chat.id;
           const text = update.message?.text?.trim();
@@ -492,6 +909,105 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 : "Belum ada history extract.",
             );
             await logger.info("runs sent", { chatId, count: lines.length });
+            continue;
+          }
+
+          if (command.kind === "subtitleTimestamp") {
+            if (command.action === "status") {
+              const enabled = isSubtitleTimestampEnabled();
+              await api.sendMessage(
+                chatId,
+                `Subtitle timestamp: ${enabled ? "AKTIF" : "NONAKTIF"}\nEXTRACT_SUBTITLE_TIMESTAMP=${enabled ? "1" : "0"}`,
+              );
+              continue;
+            }
+
+            const enabled = command.action === "on";
+            await writeSubtitleTimestampToEnv(config.envPath, enabled);
+            await api.sendMessage(
+              chatId,
+              [
+                `Subtitle timestamp berhasil di-${enabled ? "aktifkan" : "nonaktifkan"}.`,
+                `EXTRACT_SUBTITLE_TIMESTAMP=${enabled ? "1" : "0"}`,
+                `Tersimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
+              ].join("\n"),
+            );
+            await logger.info("subtitle timestamp mode changed", {
+              chatId,
+              action: command.action,
+              envPath: config.envPath,
+            });
+            continue;
+          }
+
+          if (command.kind === "subtitle") {
+            await api.sendChatAction(chatId, "typing");
+            const statusMessageId = await api.sendMessage(
+              chatId,
+              `⏳ [1/2] Mengecek subtitle\nURL: ${command.url}`,
+            );
+            const listed = await listAvailableSubtitles(command.url);
+            const resolvedOriginal = resolveOriginalLanguage(
+              listed.languages,
+              listed.originalLanguage,
+            );
+            const preferred = pickPreferredSubtitleLanguages(
+              listed.languages,
+              resolvedOriginal,
+            );
+
+            if (preferred.length === 0) {
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                [
+                  "❌ Subtitle tidak tersedia.",
+                  `Judul: ${listed.title}`,
+                  `URL: ${listed.webpageUrl}`,
+                ].join("\n"),
+              );
+              continue;
+            }
+
+            const sessionId = createSubtitleSessionId();
+            subtitleSessions.set(sessionId, {
+              chatId,
+              url: command.url,
+              title: listed.title,
+              languages: new Set(preferred.map((item) => item.code)),
+              createdAt: Date.now(),
+            });
+
+            const keyboard = buildSubtitleKeyboard(sessionId, preferred);
+            await api.editMessage(
+              chatId,
+              statusMessageId,
+              [
+                "✅ [2/2] Subtitle ditemukan",
+                `Judul: ${listed.title}`,
+                `Extractor: ${listed.extractorKey}`,
+                `Original: ${resolvedOriginal ?? "-"}`,
+                `Ditampilkan: ${preferred.length} bahasa`,
+                `Timestamp saat ini: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
+                "",
+                "Bahasa pilihan (original/en/id):",
+                renderSubtitleLanguageList(preferred),
+                "",
+                "Bahasa YouTube tersedia:",
+                renderAllYoutubeLanguages(listed.languages),
+                "",
+                "Keterangan tombol: [M]=manual, [A]=auto",
+                "Pilih bahasa subtitle dari tombol di bawah.",
+              ].join("\n"),
+            );
+            await api.sendMessage(chatId, "Pilih bahasa subtitle:", keyboard);
+
+            await logger.info("subtitle listed", {
+              chatId,
+              title: listed.title,
+              url: listed.webpageUrl,
+              languages: listed.languages.length,
+            });
             continue;
           }
 
