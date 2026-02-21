@@ -4,6 +4,7 @@ function normalizeDomain(value: string): string {
   return value
     .trim()
     .toLowerCase()
+    .replace(/^#httponly_/i, "")
     .replace(/^https?:\/\//, "")
     .replace(/\/.*$/, "")
     .replace(/^\./, "");
@@ -128,19 +129,17 @@ function parseNetscapeCookieLine(line: string): {
   };
 }
 
-export function extractCookieHeaderFromNetscape(
-  fileText: string,
-  rawDomain: string,
-): string {
-  const domain = normalizeDomain(rawDomain);
+export function extractCookieMapFromNetscape(fileText: string): CookieMap {
   const nowEpoch = Math.floor(Date.now() / 1000);
-  const cookies = new Map<string, string>();
+  const perDomain = new Map<string, Map<string, string>>();
   const lines = fileText.replaceAll(/\r\n/g, "\n").split("\n");
 
   for (const line of lines) {
     const trimmed = line.trim();
+    const isComment =
+      trimmed.startsWith("#") && !trimmed.startsWith("#HttpOnly_");
 
-    if (!trimmed || trimmed.startsWith("#")) {
+    if (!trimmed || isComment) {
       continue;
     }
 
@@ -149,30 +148,51 @@ export function extractCookieHeaderFromNetscape(
       continue;
     }
 
-    const isDomainMatch =
-      parsed.domain === domain || domain.endsWith(`.${parsed.domain}`);
-    if (!isDomainMatch) {
-      continue;
-    }
-
     const isExpired = parsed.expiresAt > 0 && parsed.expiresAt < nowEpoch;
     if (isExpired) {
       continue;
     }
 
-    cookies.set(parsed.name, parsed.value);
+    const current = perDomain.get(parsed.domain) ?? new Map<string, string>();
+    current.set(parsed.name, parsed.value);
+    perDomain.set(parsed.domain, current);
   }
 
-  return Array.from(cookies.entries())
-    .map(([name, value]) => `${name}=${value}`)
-    .join("; ");
+  return Object.fromEntries(
+    Array.from(perDomain.entries()).map(([domain, cookies]) => {
+      const header = Array.from(cookies.entries())
+        .map(([name, value]) => `${name}=${value}`)
+        .join("; ");
+
+      return [domain, header];
+    }),
+  );
+}
+
+export function extractCookieHeaderFromNetscape(
+  fileText: string,
+  rawDomain: string,
+): string {
+  const domain = normalizeDomain(rawDomain);
+  const cookieMap = extractCookieMapFromNetscape(fileText);
+  const exact = cookieMap[domain] ?? "";
+
+  if (exact) {
+    return exact;
+  }
+
+  const fallback = Object.entries(cookieMap).find(([cookieDomain]) =>
+    domain.endsWith(`.${cookieDomain}`),
+  )?.[1];
+
+  return fallback ?? "";
 }
 
 export async function writeCookieToEnv(
   envPath: string,
   rawDomain: string,
   cookieHeader: string,
-): Promise<{ domain: string; envPath: string }> {
+): Promise<{ domain: string; envPath: string; cookieMapJson: string }> {
   const domain = normalizeDomain(rawDomain);
   const envFile = Bun.file(envPath);
   const content = (await envFile.exists()) ? await envFile.text() : "";
@@ -185,14 +205,31 @@ export async function writeCookieToEnv(
   const updatedMap = Object.fromEntries(
     Object.entries(existingMap).sort((a, b) => a[0].localeCompare(b[0])),
   );
+  const cookieMapJson = JSON.stringify(updatedMap);
   const nextLines = upsertEnvValue(
     lines,
     "EXTRACT_COOKIE_MAP",
-    quoteEnvValue(JSON.stringify(updatedMap)),
+    quoteEnvValue(cookieMapJson),
   );
   const nextContent = `${nextLines.join("\n").trimEnd()}\n`;
 
   await Bun.write(envPath, nextContent);
+  process.env.EXTRACT_COOKIE_MAP = cookieMapJson;
 
-  return { domain, envPath };
+  return { domain, envPath, cookieMapJson };
+}
+
+export function hasCookieName(
+  cookieHeader: string,
+  cookieName: string,
+): boolean {
+  const target = cookieName.trim();
+  if (!target) {
+    return false;
+  }
+
+  return cookieHeader.split(";").some((part) => {
+    const [name] = part.trim().split("=");
+    return name?.trim() === target;
+  });
 }

@@ -157,8 +157,10 @@ describe("markdown helpers", () => {
       "2026-02-20T00:00:00.000Z",
     );
 
-    expect(markdown).toContain('title: "Contoh Artikel"');
+    expect(markdown).toContain("TITLE: Contoh Artikel");
     expect(markdown).toContain("# Contoh Artikel");
+    expect(markdown).toContain("_Ini ringkasan_");
+    expect(markdown).toContain("* * *");
     expect(markdown).toContain("Paragraf pertama.");
     expect(markdown).toContain("Paragraf kedua.");
   });
@@ -185,7 +187,7 @@ describe("markdown helpers", () => {
 
     expect(firstTextIndex).toBeLessThan(imageIndex);
     expect(imageIndex).toBeLessThan(secondTextIndex);
-    expect(markdown).toContain("*Caption A*");
+    expect(markdown).toContain("_Gambar 1: Caption A_");
   });
 
   test("buildArticleText returns plain text output", () => {
@@ -193,7 +195,18 @@ describe("markdown helpers", () => {
       {
         url: "https://example.com/post",
         articleTitle: "Contoh Artikel",
+        description: "Ini ringkasan",
         articleBodyText: "Paragraf pertama.\n\nParagraf kedua.",
+        contentBlocks: [
+          { type: "text", tag: "p", text: "Paragraf pertama." },
+          {
+            type: "image",
+            src: "https://example.com/image-a.jpg",
+            alt: "Gambar A",
+            caption: "Caption A",
+          },
+          { type: "text", tag: "p", text: "Paragraf kedua." },
+        ],
         publishedAt: "2026-02-20T00:00:00.000Z",
       },
       "2026-02-20T00:00:00.000Z",
@@ -201,7 +214,10 @@ describe("markdown helpers", () => {
 
     expect(textOutput).toContain("TITLE: Contoh Artikel");
     expect(textOutput).toContain("SOURCE: https://example.com/post");
+    expect(textOutput).toContain("_Ini ringkasan_");
     expect(textOutput).toContain("Paragraf pertama.");
     expect(textOutput).toContain("Paragraf kedua.");
+    expect(textOutput).toContain("[IMAGE 1] https://example.com/image-a.jpg");
+    expect(textOutput).toContain("CAPTION: Caption A");
   });
 });

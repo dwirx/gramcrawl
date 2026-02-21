@@ -6,6 +6,7 @@ export type TelegramCommand =
   | { kind: "help" }
   | { kind: "runs"; limit: number }
   | { kind: "extract"; url: string; maxPages: number }
+  | { kind: "browserMode"; action: "on" | "off" | "status" }
   | { kind: "cookieImport"; domain: string }
   | { kind: "cookieSet"; domain: string; cookie: string }
   | { kind: "unknown" };
@@ -56,6 +57,20 @@ export function parseTelegramCommand(text: string): TelegramCommand {
       url,
       maxPages: toInt(parts[2], 1),
     };
+  }
+
+  if (trimmed.startsWith("/browser")) {
+    const parts = trimmed.split(/\s+/);
+    const action = (parts[1] ?? "status").toLowerCase();
+
+    if (action === "on" || action === "off" || action === "status") {
+      return {
+        kind: "browserMode",
+        action,
+      };
+    }
+
+    return { kind: "unknown" };
   }
 
   if (trimmed.startsWith("/cookieimport")) {

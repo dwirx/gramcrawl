@@ -1,4 +1,5 @@
 import type { ContentBlock, ExtractedPage } from "./types";
+import { collectImagesFromBlocks } from "./image-utils";
 import { extractStructuredArticleFromJsonLd } from "./structured-data";
 import { normalizeScopedUrl } from "./url-utils";
 
@@ -295,6 +296,7 @@ export function extractPageFromHtml(
       articleTitle: structured.articleTitle,
       articleBodyText: structured.articleBodyText,
       contentBlocks: structured.contentBlocks,
+      images: collectImagesFromBlocks(structured.contentBlocks),
       imageCount: structured.imageCount,
       publishedAt: structured.publishedAt ?? publishedAt,
       isArticlePage: structured.articleBodyText.length > 160,
@@ -313,6 +315,7 @@ export function extractPageFromHtml(
   const imageCount = contentBlocks.filter(
     (block) => block.type === "image",
   ).length;
+  const images = collectImagesFromBlocks(contentBlocks);
   const isArticlePage =
     articleBodyText.length > 250 && !looksLikePageScriptNoise(articleBodyText);
 
@@ -325,6 +328,7 @@ export function extractPageFromHtml(
     articleTitle,
     articleBodyText,
     contentBlocks,
+    images,
     imageCount,
     publishedAt,
     isArticlePage,

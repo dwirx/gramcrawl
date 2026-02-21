@@ -50,6 +50,17 @@ describe("parseTelegramCommand", () => {
     expect(parsed.domain).toBe("projectmultatuli.org");
   });
 
+  test("parses /browser command", () => {
+    const parsed = parseTelegramCommand("/browser on");
+
+    expect(parsed.kind).toBe("browserMode");
+    if (parsed.kind !== "browserMode") {
+      throw new Error("Expected browserMode command");
+    }
+
+    expect(parsed.action).toBe("on");
+  });
+
   test("parses /cookieset command", () => {
     const parsed = parseTelegramCommand(
       "/cookieset projectmultatuli.org cf_clearance=abc; __cf_bm=def",

@@ -3,6 +3,8 @@ import { runExtraction } from "../app/extract-service";
 import { readManifest } from "../app/run-store";
 import {
   extractCookieHeaderFromNetscape,
+  extractCookieMapFromNetscape,
+  hasCookieName,
   writeCookieToEnv,
 } from "../cli/cookie-env";
 import { parseTelegramCommand } from "./command-parser";
@@ -150,6 +152,7 @@ class TelegramApi {
     chatId: number,
     path: string,
     caption?: string,
+    fileName?: string,
   ): Promise<void> {
     const file = Bun.file(path);
 
@@ -159,7 +162,11 @@ class TelegramApi {
 
     const form = new FormData();
     form.set("chat_id", String(chatId));
-    form.set("document", file, path.split("/").at(-1) ?? "document");
+    form.set(
+      "document",
+      file,
+      fileName ?? path.split("/").at(-1) ?? "document",
+    );
     if (caption) {
       form.set("caption", caption);
     }
@@ -201,6 +208,8 @@ function buildHelpMessage(): string {
   return [
     "Perintah bot:",
     "/extract <url> [maxPages] - ekstrak website ke JSON + Markdown",
+    "/browser <on|off|status> - kontrol browser fallback",
+    "Upload cookies.txt (tanpa command) - auto import semua domain",
     "/cookieimport <domain> + upload file cookies.txt",
     "/cookieset <domain> <cookie-header>",
     "/runs [limit] - lihat riwayat extract",
@@ -208,6 +217,144 @@ function buildHelpMessage(): string {
     "",
     "Anda juga bisa kirim URL langsung tanpa command.",
   ].join("\n");
+}
+
+function readEnvLines(content: string): string[] {
+  if (!content.trim()) {
+    return [];
+  }
+
+  return content.replaceAll(/\r\n/g, "\n").split("\n");
+}
+
+function upsertEnvValue(lines: string[], key: string, value: string): string[] {
+  const rendered = `${key}=${value}`;
+  let replaced = false;
+
+  const nextLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      return line;
+    }
+
+    const index = trimmed.indexOf("=");
+    if (index <= 0) {
+      return line;
+    }
+
+    const currentKey = trimmed.slice(0, index).trim();
+    if (currentKey !== key) {
+      return line;
+    }
+
+    replaced = true;
+    return rendered;
+  });
+
+  if (!replaced) {
+    nextLines.push(rendered);
+  }
+
+  return nextLines;
+}
+
+async function writeBrowserFallbackToEnv(
+  envPath: string,
+  enabled: boolean,
+): Promise<void> {
+  const envFile = Bun.file(envPath);
+  const content = (await envFile.exists()) ? await envFile.text() : "";
+  const lines = readEnvLines(content);
+  const nextLines = upsertEnvValue(
+    lines,
+    "EXTRACT_BROWSER_FALLBACK",
+    enabled ? "1" : "0",
+  );
+  const nextContent = `${nextLines.join("\n").trimEnd()}\n`;
+
+  await Bun.write(envPath, nextContent);
+  process.env.EXTRACT_BROWSER_FALLBACK = enabled ? "1" : "0";
+}
+
+function isBrowserFallbackEnabled(): boolean {
+  return (process.env.EXTRACT_BROWSER_FALLBACK ?? "0").trim() === "1";
+}
+
+function buildSendFileName(path: string, fallbackBaseName: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  const parts = normalized.split("/").filter(Boolean);
+  const baseName = parts.at(-1) ?? "document";
+  const ext = baseName.includes(".")
+    ? (baseName.split(".").at(-1) ?? "txt")
+    : "txt";
+
+  if (!baseName.startsWith("latest.")) {
+    return baseName;
+  }
+
+  const articleSlug = parts.at(-2) ?? fallbackBaseName;
+  return `${articleSlug}.${ext}`;
+}
+
+async function autoImportCookieDocument(
+  api: TelegramApi,
+  logger: ReturnType<typeof createLogger>,
+  chatId: number,
+  document: NonNullable<TelegramUpdate["message"]>["document"],
+  envPath: string,
+): Promise<boolean> {
+  if (!document?.file_id) {
+    return false;
+  }
+
+  const fileName = document.file_name?.toLowerCase() ?? "";
+  if (fileName && !fileName.includes("cookie")) {
+    return false;
+  }
+
+  const file = await api.getFilePath(document.file_id);
+  const filePath = file.file_path;
+  if (!filePath) {
+    throw new Error("Telegram file_path tidak tersedia");
+  }
+
+  const rawCookies = await api.downloadFileText(filePath);
+  const cookieMap = extractCookieMapFromNetscape(rawCookies);
+  const entries = Object.entries(cookieMap).filter(([, value]) =>
+    Boolean(value),
+  );
+
+  if (entries.length === 0) {
+    throw new Error(
+      "File tidak berisi cookie Netscape yang valid atau semua cookie sudah expired.",
+    );
+  }
+
+  for (const [domain, header] of entries) {
+    await writeCookieToEnv(envPath, domain, header);
+  }
+
+  const previewDomains = entries.slice(0, 8).map(([domain]) => domain);
+  await api.sendMessage(
+    chatId,
+    [
+      `Auto import cookie berhasil (${entries.length} domain).`,
+      `Domain: ${previewDomains.join(", ")}${entries.length > previewDomains.length ? ", ..." : ""}`,
+      `Tersimpan di ${envPath}. Cookie langsung aktif di process bot ini.`,
+      !entries.some(([, header]) => hasCookieName(header, "cf_clearance"))
+        ? "Peringatan: tidak ada cf_clearance di file. Untuk situs Cloudflare, extract bisa gagal."
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+  await logger.info("auto cookie import success", {
+    chatId,
+    fileName: document.file_name ?? "unknown",
+    envPath,
+    domains: entries.length,
+  });
+  return true;
 }
 
 async function sendFilesBatch(
@@ -232,10 +379,12 @@ async function sendFilesBatch(
     );
     await api.sendChatAction(chatId, "upload_document");
     try {
+      const sendFileName = buildSendFileName(path, title.toLowerCase());
       await api.sendDocument(
         chatId,
         path,
         `${title} ${index + 1}/${limitedFiles.length}`,
+        sendFileName,
       );
       sent += 1;
       await Bun.sleep(180);
@@ -294,7 +443,28 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           const commandInput = text || caption || "";
           const document = update.message?.document;
 
-          if (!chatId || !commandInput) {
+          if (!chatId) {
+            continue;
+          }
+
+          if (document && !commandInput) {
+            await logger.info("document received", {
+              chatId,
+              fileName: document.file_name ?? "unknown",
+            });
+            const imported = await autoImportCookieDocument(
+              api,
+              logger,
+              chatId,
+              document,
+              config.envPath,
+            );
+            if (imported) {
+              continue;
+            }
+          }
+
+          if (!commandInput) {
             continue;
           }
 
@@ -325,14 +495,59 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             continue;
           }
 
+          if (command.kind === "browserMode") {
+            if (command.action === "status") {
+              const enabled = isBrowserFallbackEnabled();
+              await api.sendMessage(
+                chatId,
+                `Browser fallback: ${enabled ? "AKTIF" : "NONAKTIF"}\nEXTRACT_BROWSER_FALLBACK=${enabled ? "1" : "0"}`,
+              );
+              continue;
+            }
+
+            const enabled = command.action === "on";
+            await writeBrowserFallbackToEnv(config.envPath, enabled);
+            await api.sendMessage(
+              chatId,
+              [
+                `Browser fallback berhasil di-${enabled ? "aktifkan" : "nonaktifkan"}.`,
+                `EXTRACT_BROWSER_FALLBACK=${enabled ? "1" : "0"}`,
+                `Tersimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
+              ].join("\n"),
+            );
+            await logger.info("browser mode changed", {
+              chatId,
+              action: command.action,
+              envPath: config.envPath,
+            });
+            continue;
+          }
+
           if (command.kind === "extract") {
+            const extractStartedAt = Date.now();
+            let lastStatusText = "";
+            let lastStatusAt = 0;
+            let liveStatusText = "";
+            let lastProgressAt = Date.now();
             const safeStatusUpdate = async (
               messageId: number,
               textValue: string,
             ): Promise<void> => {
+              const now = Date.now();
+              const isFinal =
+                textValue.startsWith("✅") || textValue.includes("[5/5]");
+              if (textValue === lastStatusText) {
+                return;
+              }
+              if (!isFinal && now - lastStatusAt < 900) {
+                return;
+              }
+
               try {
                 await api.sendChatAction(chatId, "typing");
                 await api.editMessage(chatId, messageId, textValue);
+                lastStatusText = textValue;
+                lastStatusAt = now;
               } catch (error) {
                 await logger.warn("status update failed", {
                   chatId,
@@ -346,41 +561,65 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               chatId,
               `⏳ [1/5] Memulai extract\nURL: ${command.url}\nmaxPages=${command.maxPages}`,
             );
+            liveStatusText = `⏳ [1/5] Memulai extract\nURL: ${command.url}\nmaxPages=${command.maxPages}`;
             await logger.info("extract started", {
               chatId,
               url: command.url,
               maxPages: command.maxPages,
             });
 
-            const extraction = await runExtraction(
-              {
-                rootUrl: command.url,
-                maxPages: command.maxPages,
-                outputRoot: config.outputRoot,
-              },
-              {
-                onProgress: async (progress) => {
-                  const statusMap: Record<string, string> = {
-                    init: "⏳ [1/5] Menyiapkan proses",
-                    crawl: "⏳ [2/5] Mengambil konten website",
-                    files: "⏳ [3/5] Menyusun file MD/TXT",
-                    save: "⏳ [4/5] Menyimpan hasil",
-                    done: "⏳ [5/5] Menyelesaikan proses",
-                  };
-                  const prefix =
-                    statusMap[progress.step] ?? "⏳ [..] Processing";
-                  const statusText = `${prefix}\n${progress.message}`;
-                  await logger.info("extract progress", {
-                    chatId,
-                    url: command.url,
-                    step: progress.step,
-                    detail: progress.message,
-                  });
+            const heartbeat = setInterval(async () => {
+              try {
+                const now = Date.now();
+                if (now - lastProgressAt < 12_000) {
+                  return;
+                }
+                const elapsed = Math.floor((now - extractStartedAt) / 1000);
+                await safeStatusUpdate(
+                  statusMessageId,
+                  `${liveStatusText}\nSedang diproses... ${elapsed}s`,
+                );
+              } catch {
+                // noop
+              }
+            }, 12_000);
 
-                  await safeStatusUpdate(statusMessageId, statusText);
+            let extraction;
+            try {
+              extraction = await runExtraction(
+                {
+                  rootUrl: command.url,
+                  maxPages: command.maxPages,
+                  outputRoot: config.outputRoot,
                 },
-              },
-            );
+                {
+                  onProgress: async (progress) => {
+                    const statusMap: Record<string, string> = {
+                      init: "⏳ [1/5] Menyiapkan proses",
+                      crawl: "⏳ [2/5] Mengambil konten website",
+                      files: "⏳ [3/5] Menyusun file MD/TXT",
+                      save: "⏳ [4/5] Menyimpan hasil",
+                      done: "⏳ [5/5] Menyelesaikan proses",
+                    };
+                    const prefix =
+                      statusMap[progress.step] ?? "⏳ [..] Processing";
+                    const statusText = `${prefix}\n${progress.message}`;
+                    liveStatusText = statusText;
+                    lastProgressAt = Date.now();
+                    await logger.info("extract progress", {
+                      chatId,
+                      url: command.url,
+                      step: progress.step,
+                      detail: progress.message,
+                    });
+
+                    await safeStatusUpdate(statusMessageId, statusText);
+                  },
+                },
+              );
+            } finally {
+              clearInterval(heartbeat);
+            }
 
             await safeStatusUpdate(
               statusMessageId,
@@ -401,10 +640,12 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             );
 
             try {
+              const resultJsonName = `${extraction.site}__extract.json`;
               await api.sendDocument(
                 chatId,
                 extraction.resultFile,
                 "Result JSON",
+                resultJsonName,
               );
             } catch (error) {
               await logger.warn("failed to send result json", {
@@ -447,6 +688,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               runId: extraction.runId,
               site: extraction.site,
               crawledPages: extraction.result.crawledPages,
+              durationMs: Date.now() - extractStartedAt,
             });
             continue;
           }
@@ -459,7 +701,14 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             );
             await api.sendMessage(
               chatId,
-              `Cookie untuk domain ${command.domain} tersimpan ke ${config.envPath}. Restart bot agar env terbaca ulang.`,
+              [
+                `Cookie untuk domain ${command.domain} tersimpan ke ${config.envPath}. Cookie langsung aktif.`,
+                !hasCookieName(command.cookie, "cf_clearance")
+                  ? "Peringatan: cookie belum berisi cf_clearance. Untuk situs Cloudflare, extract bisa gagal."
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
             );
             await logger.info("cookie set from command", {
               chatId,
@@ -508,8 +757,13 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               [
                 `Cookie domain ${command.domain} berhasil diimport.`,
                 `Tersimpan di ${config.envPath}.`,
-                "Restart bot agar environment terbaru terbaca.",
-              ].join("\n"),
+                "Cookie langsung aktif di process bot ini.",
+                !hasCookieName(cookieHeader, "cf_clearance")
+                  ? "Peringatan: cookie domain ini belum berisi cf_clearance. Untuk situs Cloudflare, extract bisa gagal."
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
             );
             await logger.info("cookie imported from telegram file", {
               chatId,
@@ -518,6 +772,19 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               envPath: config.envPath,
             });
             continue;
+          }
+
+          if (document && command.kind === "unknown") {
+            const imported = await autoImportCookieDocument(
+              api,
+              logger,
+              chatId,
+              document,
+              config.envPath,
+            );
+            if (imported) {
+              continue;
+            }
           }
 
           await api.sendMessage(chatId, buildHelpMessage());

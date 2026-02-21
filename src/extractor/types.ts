@@ -13,6 +13,14 @@ export type ContentImageBlock = {
 
 export type ContentBlock = ContentTextBlock | ContentImageBlock;
 
+export type ExtractedImage = {
+  src: string;
+  alt: string;
+  caption: string;
+  order: number;
+  blockOrder: number;
+};
+
 export type ExtractedPage = {
   url: string;
   title: string;
@@ -22,6 +30,7 @@ export type ExtractedPage = {
   articleTitle: string;
   articleBodyText: string;
   contentBlocks: ContentBlock[];
+  images: ExtractedImage[];
   imageCount: number;
   publishedAt: string | null;
   isArticlePage: boolean;

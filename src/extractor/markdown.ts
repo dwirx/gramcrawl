@@ -4,6 +4,49 @@ function normalizeWhitespace(value: string): string {
   return value.replaceAll(/\s+/g, " ").trim();
 }
 
+const UI_NOISE_TEXTS = new Set([
+  "subscribe",
+  "sign in",
+  "share",
+  "comments",
+  "restacks",
+  "like",
+  "likes",
+  "toplatestdiscussions",
+  "see all",
+  "ready for more?",
+  "skip to content",
+  "support us",
+  "unduh data",
+  "bagikan tautan",
+  "pilihan editor",
+  "search",
+  "cari",
+  "search cari",
+  "search search",
+  "jadi kawan m",
+  "proyeksengsaranasional",
+]);
+
+const STOP_MARKERS = [
+  "discussion about this post",
+  "ready for more?",
+  "toplatestdiscussions",
+  "temukan kumpulan riset terkait",
+  "see all",
+  "berikut sebaran masalahnya",
+];
+
+const IMAGE_NOISE_SRC_MARKERS = [
+  "cdn.userway.org",
+  "/quote-1.svg",
+  "/logo-",
+  "logo-",
+  "/avatars/",
+  "spin_wh.svg",
+  "body_wh.svg",
+];
+
 function toDisplayDate(rawDate: string): string {
   const date = new Date(rawDate);
 
@@ -45,21 +88,14 @@ export function buildArticleMarkdown(
     `DATE: ${displayDate}`,
     "================================================================================",
     "",
-    "---",
-    `title: ${JSON.stringify(page.articleTitle)}`,
-    `source: ${JSON.stringify(page.url)}`,
-    `publishedAt: ${JSON.stringify(page.publishedAt)}`,
-    `collectedAt: ${JSON.stringify(collectedAt)}`,
-    "---",
-    "",
     `# ${page.articleTitle}`,
     "",
-    `Source: [${page.url}](${page.url})`,
+    `Source: ${page.url}`,
     "",
   ];
 
   if (page.description) {
-    lines.push(`> ${page.description}`, "");
+    lines.push(`_${page.description}_`, "", "* * *", "");
   }
 
   const bodyMarkdown = buildMarkdownFromBlocks(page.contentBlocks);
@@ -82,11 +118,20 @@ export function buildArticleMarkdown(
 export function buildArticleText(
   page: Pick<
     ExtractedPage,
-    "url" | "articleTitle" | "articleBodyText" | "publishedAt"
+    | "url"
+    | "articleTitle"
+    | "description"
+    | "articleBodyText"
+    | "contentBlocks"
+    | "publishedAt"
   >,
   collectedAt: string,
 ): string {
   const displayDate = toDisplayDate(page.publishedAt ?? collectedAt);
+  const bodyText = buildTextFromBlocks(
+    page.contentBlocks,
+    page.articleBodyText,
+  );
 
   return [
     "================================================================================",
@@ -95,15 +140,18 @@ export function buildArticleText(
     `DATE: ${displayDate}`,
     "================================================================================",
     "",
-    page.articleBodyText,
+    ...(page.description ? [`_${page.description}_`, "", "* * *", ""] : []),
+    bodyText,
     "",
   ].join("\n");
 }
 
 export function buildMarkdownFromBlocks(blocks: ContentBlock[]): string {
+  const filteredBlocks = filterRenderableBlocks(blocks);
   const lines: string[] = [];
 
-  for (const block of blocks) {
+  let imageIndex = 0;
+  for (const block of filteredBlocks) {
     if (block.type === "text") {
       const text = normalizeWhitespace(block.text);
 
@@ -113,14 +161,197 @@ export function buildMarkdownFromBlocks(blocks: ContentBlock[]): string {
       continue;
     }
 
+    imageIndex += 1;
     const alt = normalizeWhitespace(block.alt) || "image";
     const caption = normalizeWhitespace(block.caption);
 
     lines.push(`![${alt}](${block.src})`, "");
     if (caption) {
-      lines.push(`*${caption}*`, "");
+      lines.push(
+        `_Gambar ${imageIndex}: ${formatCaptionMarkdown(caption)}_`,
+        "",
+      );
+    } else {
+      lines.push(`_Gambar ${imageIndex}_`, "");
     }
   }
 
   return lines.join("\n").trim();
+}
+
+function buildTextFromBlocks(
+  blocks: ContentBlock[],
+  fallbackBody: string,
+): string {
+  const filteredBlocks = filterRenderableBlocks(blocks);
+
+  if (filteredBlocks.length === 0) {
+    return fallbackBody;
+  }
+
+  const lines: string[] = [];
+  let imageIndex = 0;
+
+  for (const block of filteredBlocks) {
+    if (block.type === "text") {
+      const text = normalizeWhitespace(block.text);
+      if (text) {
+        lines.push(text, "");
+      }
+      continue;
+    }
+
+    imageIndex += 1;
+    const src = normalizeWhitespace(block.src);
+    const alt = normalizeWhitespace(block.alt);
+    const caption = normalizeWhitespace(block.caption);
+
+    lines.push(`[IMAGE ${imageIndex}] ${src}`);
+
+    if (alt) {
+      lines.push(`ALT: ${alt}`);
+    }
+
+    if (caption) {
+      lines.push(`CAPTION: ${caption}`);
+    }
+
+    lines.push("");
+  }
+
+  const built = lines.join("\n").trim();
+  return built || fallbackBody;
+}
+
+function filterRenderableBlocks(blocks: ContentBlock[]): ContentBlock[] {
+  const filtered: ContentBlock[] = [];
+  let previousTextKey = "";
+  let shouldStop = false;
+  const seenLongTextKeys = new Set<string>();
+
+  for (const block of blocks) {
+    if (shouldStop) {
+      break;
+    }
+
+    if (block.type === "text") {
+      const text = normalizeWhitespace(block.text);
+      if (!text || isUiNoiseLine(text)) {
+        continue;
+      }
+
+      const key = normalizeForNoise(text);
+      if (STOP_MARKERS.some((marker) => key.includes(marker))) {
+        shouldStop = true;
+        continue;
+      }
+
+      if (key.length >= 24 && seenLongTextKeys.has(key)) {
+        continue;
+      }
+      if (key.length >= 24) {
+        seenLongTextKeys.add(key);
+      }
+
+      if (key === previousTextKey) {
+        continue;
+      }
+
+      previousTextKey = key;
+      filtered.push({ ...block, text });
+      continue;
+    }
+
+    previousTextKey = "";
+    if (shouldSkipImageInOutput(block.src, block.alt, block.caption)) {
+      continue;
+    }
+    filtered.push({
+      ...block,
+      src: normalizeWhitespace(block.src),
+      alt: normalizeWhitespace(block.alt),
+      caption: normalizeWhitespace(block.caption),
+    });
+  }
+
+  return filtered;
+}
+
+function isUiNoiseLine(text: string): boolean {
+  const lowered = normalizeForNoise(text);
+  if (UI_NOISE_TEXTS.has(lowered)) {
+    return true;
+  }
+
+  if (lowered.startsWith("© ")) {
+    return true;
+  }
+
+  if (/^(\*+\s*)?(en|id|home|menu)(\s*\*+)?$/i.test(lowered)) {
+    return true;
+  }
+
+  if (lowered.includes("made with flourish")) {
+    return true;
+  }
+
+  if (
+    lowered.includes("create a chart") ||
+    lowered.includes("create a hierarchy graph") ||
+    lowered.includes("create a pictogram chart")
+  ) {
+    return true;
+  }
+
+  return /^(artikel|reportase|ide & esai|multimedia|cerita foto|video|siniar|serial|tentang kami)(\s+\*?\s*(artikel|reportase|ide & esai|multimedia|cerita foto|video|siniar|serial|tentang kami))*$/i.test(
+    lowered.replaceAll(/\*/g, " ").replaceAll(/\s+/g, " ").trim(),
+  );
+}
+
+function shouldSkipImageInOutput(
+  srcValue: string,
+  altValue: string,
+  captionValue: string,
+): boolean {
+  const src = normalizeWhitespace(srcValue).toLowerCase();
+  const alt = normalizeWhitespace(altValue).toLowerCase();
+  const caption = normalizeWhitespace(captionValue).toLowerCase();
+
+  if (!src) {
+    return true;
+  }
+
+  if (src.endsWith(".svg")) {
+    return true;
+  }
+
+  if (IMAGE_NOISE_SRC_MARKERS.some((marker) => src.includes(marker))) {
+    return true;
+  }
+
+  if (/^image\s*\d+/i.test(alt)) {
+    return true;
+  }
+
+  if (caption && /^https?:\/\/[^/]+\/?$/i.test(caption)) {
+    return true;
+  }
+
+  return false;
+}
+
+function formatCaptionMarkdown(caption: string): string {
+  if (/^https?:\/\//i.test(caption)) {
+    return `[Sumber gambar](${caption})`;
+  }
+
+  return caption;
+}
+
+function normalizeForNoise(text: string): string {
+  return normalizeWhitespace(text)
+    .toLowerCase()
+    .replaceAll(/\*|_|`|#|>|\[|\]|\(|\)/g, " ")
+    .replaceAll(/\s+/g, " ")
+    .trim();
 }

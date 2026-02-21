@@ -1,6 +1,7 @@
 import { parseCliArgs, formatCliError } from "./cli/parse-args";
 import {
   extractCookieHeaderFromNetscape,
+  hasCookieName,
   writeCookieToEnv,
 } from "./cli/cookie-env";
 import { runExtraction } from "./app/extract-service";
@@ -67,8 +68,13 @@ async function runCli(argv: string[]): Promise<void> {
       `Cookie domain ${updated.domain} tersimpan ke ${updated.envPath}`,
     );
     await writeLine(
-      `Panjang cookie: ${cookie.length} karakter. Jalankan ulang bot/CLI setelah update .env.`,
+      `Panjang cookie: ${cookie.length} karakter. Langsung aktif di process ini.`,
     );
+    if (!hasCookieName(cookie, "cf_clearance")) {
+      await writeLine(
+        "Peringatan: cookie ini belum berisi cf_clearance. Untuk situs Cloudflare, extract kemungkinan tetap gagal.",
+      );
+    }
     return;
   }
 
@@ -81,9 +87,12 @@ async function runCli(argv: string[]): Promise<void> {
     await writeLine(
       `Cookie domain ${updated.domain} tersimpan ke ${updated.envPath}`,
     );
-    await writeLine(
-      "Jalankan ulang bot/CLI agar environment terbaru terbaca oleh process.",
-    );
+    await writeLine("Cookie langsung aktif di process ini.");
+    if (!hasCookieName(command.cookie, "cf_clearance")) {
+      await writeLine(
+        "Peringatan: cookie ini belum berisi cf_clearance. Untuk situs Cloudflare, extract kemungkinan tetap gagal.",
+      );
+    }
     return;
   }
 

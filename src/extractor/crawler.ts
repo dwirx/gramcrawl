@@ -1,10 +1,25 @@
+import { fetchBrowserFallbackHtml } from "./browser-fallback";
 import { loadCheerioModule } from "./cheerio-loader";
+import { collectImagesFromBlocks } from "./image-utils";
 import { extractPageFromHtml } from "./page-extractor";
 import {
   fetchRenderedFallbackArticle,
   type RenderedFallbackArticle,
 } from "./rendered-fallback";
 import type { ExtractionResult, ExtractedPage } from "./types";
+
+export type CrawlProgress = {
+  step: "page-start" | "page-done" | "page-failed";
+  url: string;
+  crawledPages: number;
+  queueLength: number;
+  maxPages: number;
+  message: string;
+};
+
+export type CrawlOptions = {
+  onProgress?: (progress: CrawlProgress) => Promise<void> | void;
+};
 
 function readCookieOverride(url: string): string {
   const host = new URL(url).hostname.toLowerCase();
@@ -72,6 +87,7 @@ function buildExtractedPageFromRenderedFallback(
     articleTitle: fallback.articleTitle,
     articleBodyText: fallback.articleBodyText,
     contentBlocks: fallback.contentBlocks,
+    images: collectImagesFromBlocks(fallback.contentBlocks),
     imageCount: fallback.imageCount,
     publishedAt: fallback.publishedAt,
     isArticlePage: fallback.articleBodyText.length > 80,
@@ -127,6 +143,8 @@ function buildBlockedError(url: string): Error {
       "EXTRACT_COOKIE='cf_clearance=...; ...'",
       "atau domain map:",
       `EXTRACT_COOKIE_MAP='{"projectmultatuli.org":"cf_clearance=...; ..."}'`,
+      "Alternatif browser-session:",
+      "EXTRACT_BROWSER_FALLBACK=1 (opsional: EXTRACT_BROWSER_HEADLESS=0 untuk verifikasi manual, EXTRACT_BROWSER_WAIT_MS=120000).",
     ].join(" "),
   );
 }
@@ -164,12 +182,14 @@ async function fetchMediumProviderHtml(url: string): Promise<string | null> {
 export async function crawlCheerioDocs(
   rootUrl: string,
   maxPages: number,
+  options?: CrawlOptions,
 ): Promise<ExtractionResult> {
   const scopedRootUrl = new URL(rootUrl);
 
   const cheerio = await loadCheerioModule();
 
   const queue: string[] = [scopedRootUrl.toString()];
+  const queued = new Set<string>([scopedRootUrl.toString()]);
   const visited = new Set<string>();
   const pages: ExtractedPage[] = [];
 
@@ -180,7 +200,16 @@ export async function crawlCheerioDocs(
       continue;
     }
 
+    queued.delete(currentUrl);
     visited.add(currentUrl);
+    await options?.onProgress?.({
+      step: "page-start",
+      url: currentUrl,
+      crawledPages: pages.length,
+      queueLength: queue.length,
+      maxPages,
+      message: `Memproses halaman ${pages.length + 1}/${maxPages}: ${currentUrl}`,
+    });
 
     try {
       const html = await fetchHtml(currentUrl);
@@ -221,6 +250,7 @@ export async function crawlCheerioDocs(
           extracted.description = fallback.description || extracted.description;
           extracted.articleBodyText = fallback.articleBodyText;
           extracted.contentBlocks = fallback.contentBlocks;
+          extracted.images = collectImagesFromBlocks(fallback.contentBlocks);
           extracted.imageCount = fallback.imageCount;
           extracted.publishedAt = fallback.publishedAt ?? extracted.publishedAt;
           extracted.isArticlePage = fallback.articleBodyText.length > 80;
@@ -250,17 +280,58 @@ export async function crawlCheerioDocs(
       }
 
       if (!extracted || looksLikeBlockedPage(extracted)) {
+        const browserHtml = await fetchBrowserFallbackHtml(currentUrl);
+
+        if (browserHtml) {
+          const browserExtracted = extractPageFromHtml(
+            currentUrl,
+            browserHtml,
+            scopedRootUrl,
+            cheerio.load,
+          );
+
+          if (
+            !looksLikeBlockedPage(browserExtracted) &&
+            browserExtracted.articleBodyText.length > 160
+          ) {
+            extracted = browserExtracted;
+          }
+        }
+      }
+
+      if (!extracted || looksLikeBlockedPage(extracted)) {
         throw buildBlockedError(currentUrl);
       }
 
       pages.push(extracted);
+      await options?.onProgress?.({
+        step: "page-done",
+        url: currentUrl,
+        crawledPages: pages.length,
+        queueLength: queue.length,
+        maxPages,
+        message: `Berhasil: ${pages.length}/${maxPages} halaman`,
+      });
 
       for (const link of extracted.links) {
-        if (!visited.has(link) && shouldQueueLink(link, scopedRootUrl)) {
+        if (
+          !visited.has(link) &&
+          !queued.has(link) &&
+          shouldQueueLink(link, scopedRootUrl)
+        ) {
           queue.push(link);
+          queued.add(link);
         }
       }
     } catch {
+      await options?.onProgress?.({
+        step: "page-failed",
+        url: currentUrl,
+        crawledPages: pages.length,
+        queueLength: queue.length,
+        maxPages,
+        message: `Gagal halaman: ${currentUrl}`,
+      });
       if (pages.length === 0) {
         throw buildBlockedError(currentUrl);
       }

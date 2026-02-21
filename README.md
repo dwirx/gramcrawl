@@ -84,18 +84,31 @@ Tool ini sekarang punya mode CLI modular dan history run.
   bun run src/cli.ts cookie-set projectmultatuli.org "cf_clearance=...; __cf_bm=..."
   ```
 
-Output disimpan per-run agar hasil sebelumnya tidak hilang:
+Output disimpan per-domain dan per-judul artikel agar rapi:
 
-- `output/sites/<domain>/runs/<run-id>/extract.json`
-- `output/sites/<domain>/runs/<run-id>/markdown/*.md`
-- `output/sites/<domain>/runs/<run-id>/text/*.txt`
-- `output/sites/<domain>/runs-manifest.json`
+- `output/sites/<domain>/last-extract.json`
 - `output/sites/<domain>/latest.json`
+- `output/sites/<domain>/history/<timestamp>__extract.json`
+- `output/sites/<domain>/<judul-artikel>/latest.md`
+- `output/sites/<domain>/<judul-artikel>/latest.txt`
+- `output/sites/<domain>/<judul-artikel>/latest.json`
+- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.md`
+- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.txt`
+- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.json`
+- `output/sites/<domain>/runs-manifest.json`
 - `output/runs-manifest.json` (gabungan semua situs)
+
+Catatan:
+
+- Folder artikel memakai slug judul artikel.
+- File history pakai prefix timestamp (tanggal + jam) supaya urutan otomatis.
+- Jika isi artikel tidak berubah, file history tidak ditambah lagi (anti-duplicate).
 
 Command Telegram bot:
 
 - `/extract <url> [maxPages]`
+- `/browser <on|off|status>`
+- upload `cookies.txt` langsung (tanpa command) untuk auto import domain dari file
 - `/cookieimport <domain>` (kirim file `cookies.txt` dan pakai command ini di caption)
 - `/cookieset <domain> <cookie-header>`
 - `/runs [limit]`
@@ -107,6 +120,15 @@ Variabel env tambahan untuk website anti-bot:
 - `EXTRACT_COOKIE_MAP` untuk cookie per domain (format JSON string)
   - contoh:
     `EXTRACT_COOKIE_MAP="{\"projectmultatuli.org\":\"cf_clearance=...; __cf_bm=...\"}"`
+- `EXTRACT_BROWSER_FALLBACK=1` untuk aktifkan fallback browser session (Playwright)
+- `EXTRACT_BROWSER_HEADLESS=0` untuk mode non-headless (agar bisa verifikasi manual)
+- `EXTRACT_BROWSER_WAIT_MS=120000` untuk lama tunggu challenge/verification
+
+Jika memakai browser fallback, install browser binary dulu:
+
+```bash
+bunx playwright install chromium
+```
 
 Saat `/extract` selesai, bot akan mengirim file:
 

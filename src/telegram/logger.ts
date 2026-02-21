@@ -17,7 +17,13 @@ function normalizeError(error: unknown): string | null {
   }
 
   if (error instanceof Error) {
-    return error.message;
+    const stackLine = error.stack
+      ?.split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(1, 2)
+      .join(" | ");
+    return stackLine ? `${error.message} | ${stackLine}` : error.message;
   }
 
   if (typeof error === "string") {
