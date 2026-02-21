@@ -40,6 +40,17 @@ describe("parseTelegramCommand", () => {
     expect(parsed.action).toBe("off");
   });
 
+  test("parses /timestamp alias command", () => {
+    const parsed = parseTelegramCommand("/timestamp on");
+
+    expect(parsed.kind).toBe("subtitleTimestamp");
+    if (parsed.kind !== "subtitleTimestamp") {
+      throw new Error("Expected subtitleTimestamp command");
+    }
+
+    expect(parsed.action).toBe("on");
+  });
+
   test("parses /runs command with limit", () => {
     const parsed = parseTelegramCommand("/runs 5");
 

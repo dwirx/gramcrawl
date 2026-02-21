@@ -42,6 +42,19 @@ describe("subtitle timestamp parser", () => {
     expect(parsed).toContain("[00:00:04] Second line");
   });
 
+  test("parses VTT timestamp without milliseconds", () => {
+    const raw = [
+      "WEBVTT",
+      "",
+      "00:00:01 --> 00:00:03 align:start position:0%",
+      "Hello no millis",
+      "",
+    ].join("\n");
+
+    const parsed = parseVttToTimestampText(raw);
+    expect(parsed).toContain("[00:00:01] Hello no millis");
+  });
+
   test("sorts manual subtitles before auto subtitles", () => {
     const sorted = sortSubtitleLanguages([
       { code: "id", hasManual: false, hasAuto: true },

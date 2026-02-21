@@ -61,7 +61,11 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (trimmed.startsWith("/subtitletimestamp")) {
+  if (
+    trimmed.startsWith("/subtitletimestamp") ||
+    trimmed.startsWith("/subtitlets") ||
+    trimmed.startsWith("/timestamp")
+  ) {
     const parts = trimmed.split(/\s+/);
     const action = (parts[1] ?? "status").toLowerCase();
 

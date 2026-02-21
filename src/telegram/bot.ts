@@ -277,6 +277,7 @@ function buildHelpMessage(): string {
     "/extract <url> [maxPages] - ekstrak website ke JSON + Markdown",
     "/subtitle <url> - tampilkan subtitle tersedia (pilih via tombol)",
     "/subtitletimestamp <on|off|status> - kontrol timestamp di hasil subtitle MD/TXT",
+    "/timestamp <on|off|status> - alias cepat subtitle timestamp",
     "/browser <on|off|status> - kontrol browser fallback",
     "Upload cookies.txt (tanpa command) - auto import semua domain",
     "/cookieimport <domain> + upload file cookies.txt",

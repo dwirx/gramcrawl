@@ -104,6 +104,33 @@ function toReadableTimestamp(value: string): string {
   return "00:00:00";
 }
 
+function parseCueStartTimestamp(line: string): string | null {
+  const normalized = line.trim();
+
+  const arrowIndex = normalized.indexOf("-->");
+  if (arrowIndex <= 0) {
+    return null;
+  }
+
+  const leftSide = normalizeWhitespace(normalized.slice(0, arrowIndex));
+  if (!leftSide) {
+    return null;
+  }
+
+  const timeMatch = leftSide.match(
+    /^(?:(\d{2}):)?(\d{2}):(\d{2})(?:[.,]\d{1,3})?$/,
+  );
+  if (!timeMatch) {
+    return null;
+  }
+
+  const hours = timeMatch[1] ?? "00";
+  const minutes = timeMatch[2] ?? "00";
+  const seconds = timeMatch[3] ?? "00";
+
+  return `${hours.padStart(2, "0")}:${minutes.padStart(2, "0")}:${seconds.padStart(2, "0")}`;
+}
+
 function extractSrtCues(raw: string): SubtitleCue[] {
   const lines = raw.replaceAll(/\r\n/g, "\n").split("\n");
   const cues: SubtitleCue[] = [];
@@ -129,11 +156,9 @@ function extractSrtCues(raw: string): SubtitleCue[] {
       continue;
     }
 
-    const timeMatch = trimmed.match(
-      /^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}/,
-    );
-    if (timeMatch?.[1]) {
-      currentTimestamp = toReadableTimestamp(timeMatch[1]);
+    const parsedTimestamp = parseCueStartTimestamp(trimmed);
+    if (parsedTimestamp) {
+      currentTimestamp = toReadableTimestamp(parsedTimestamp);
       currentTextLines = [];
       continue;
     }
@@ -184,11 +209,9 @@ function extractVttCues(raw: string): SubtitleCue[] {
       continue;
     }
 
-    const timeMatch = trimmed.match(
-      /^((?:\d{2}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+(?:\d{2}:)?\d{2}:\d{2}\.\d{3}/,
-    );
-    if (timeMatch?.[1]) {
-      currentTimestamp = toReadableTimestamp(timeMatch[1]);
+    const parsedTimestamp = parseCueStartTimestamp(trimmed);
+    if (parsedTimestamp) {
+      currentTimestamp = toReadableTimestamp(parsedTimestamp);
       currentTextLines = [];
       continue;
     }
@@ -303,16 +326,9 @@ function buildMarkdownFromText(
   timestampTranscript: string,
   includeTimestamp: boolean,
 ): string {
-  const sections = ["## Transcript", "", transcript.trim(), ""];
-
-  if (includeTimestamp) {
-    sections.push(
-      "## Transcript With Timestamp",
-      "",
-      timestampTranscript.trim(),
-      "",
-    );
-  }
+  const sections = includeTimestamp
+    ? ["## Transcript With Timestamp", "", timestampTranscript.trim(), ""]
+    : ["## Transcript", "", transcript.trim(), ""];
 
   return [
     "================================================================================",
@@ -340,14 +356,26 @@ function buildTextFromText(
   timestampTranscript: string,
   includeTimestamp: boolean,
 ): string {
-  return buildMarkdownFromText(
+  const sections = includeTimestamp
+    ? ["Transcript With Timestamp", "", timestampTranscript.trim(), ""]
+    : ["Transcript", "", transcript.trim(), ""];
+
+  return [
+    "================================================================================",
+    `TITLE: ${title}`,
+    `SOURCE: ${source}`,
+    `LANGUAGE: ${language}`,
+    "================================================================================",
+    "",
     title,
-    source,
-    language,
-    transcript,
-    timestampTranscript,
-    includeTimestamp,
-  );
+    "",
+    `Source: ${source}`,
+    "",
+    `Language: ${language}`,
+    "",
+    ...sections,
+    "",
+  ].join("\n");
 }
 
 function resolveYtDlpBinary(): string {
@@ -667,6 +695,10 @@ export async function downloadSubtitlesAndConvert(
   const timestampTranscript = srtPath
     ? parseSrtToTimestampText(transcriptSource)
     : parseVttToTimestampText(transcriptSource);
+  const finalTimestampTranscript =
+    includeTimestamp && !timestampTranscript.trim()
+      ? "[00:00:00] Timestamp tidak tersedia dari sumber subtitle."
+      : timestampTranscript;
 
   const txtPath = `${outputDir}/${titleSlug}.${language}.txt`;
   const mdPath = `${outputDir}/${titleSlug}.${language}.md`;
@@ -677,7 +709,7 @@ export async function downloadSubtitlesAndConvert(
       listed.webpageUrl,
       language,
       transcript,
-      timestampTranscript,
+      finalTimestampTranscript,
       includeTimestamp,
     ),
   );
@@ -688,7 +720,7 @@ export async function downloadSubtitlesAndConvert(
       listed.webpageUrl,
       language,
       transcript,
-      timestampTranscript,
+      finalTimestampTranscript,
       includeTimestamp,
     ),
   );
