@@ -34,7 +34,12 @@ function isUrl(value: string): boolean {
 export function parseTelegramCommand(text: string): TelegramCommand {
   const trimmed = text.trim();
 
-  if (!trimmed || trimmed === "/start" || trimmed === "/help") {
+  if (
+    !trimmed ||
+    trimmed === "/start" ||
+    trimmed === "/help" ||
+    trimmed === "/menu"
+  ) {
     return { kind: "help" };
   }
 

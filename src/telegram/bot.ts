@@ -273,20 +273,72 @@ class TelegramApi {
 
 function buildHelpMessage(): string {
   return [
-    "Perintah bot:",
-    "/extract <url> [maxPages] - ekstrak website ke JSON + Markdown",
-    "/subtitle <url> - tampilkan subtitle tersedia (pilih via tombol)",
-    "/subtitletimestamp <on|off|status> - kontrol timestamp di hasil subtitle MD/TXT",
-    "/timestamp <on|off|status> - alias cepat subtitle timestamp",
-    "/browser <on|off|status> - kontrol browser fallback",
-    "Upload cookies.txt (tanpa command) - auto import semua domain",
-    "/cookieimport <domain> + upload file cookies.txt",
-    "/cookieset <domain> <cookie-header>",
-    "/runs [limit] - lihat riwayat extract",
-    "/help - bantuan",
+    "TeleExtract Bot - Bantuan",
     "",
-    "Anda juga bisa kirim URL langsung tanpa command.",
+    "Perintah utama:",
+    "• /extract <url> [maxPages]",
+    "  Ekstrak website ke JSON + Markdown + TXT.",
+    "• /subtitle <url>",
+    "  Ambil subtitle YouTube (pilih bahasa lewat tombol).",
+    "• /runs [limit]",
+    "  Lihat riwayat extract terbaru.",
+    "",
+    "Pengaturan:",
+    "• /subtitletimestamp <on|off|status>",
+    "• /timestamp <on|off|status> (alias cepat)",
+    "• /browser <on|off|status>",
+    "",
+    "Cookie:",
+    "• Upload cookies.txt tanpa command",
+    "  Auto import semua domain dari file.",
+    "• /cookieimport <domain> (pakai caption saat upload file)",
+    "• /cookieset <domain> <cookie-header>",
+    "",
+    "Tips cepat:",
+    "• Kirim URL langsung tanpa command untuk extract 1 halaman.",
+    "• /menu atau /help untuk tampilkan bantuan ini.",
   ].join("\n");
+}
+
+function modeLabel(enabled: boolean): string {
+  return enabled ? "AKTIF" : "NONAKTIF";
+}
+
+function modeEnvValue(enabled: boolean): "1" | "0" {
+  return enabled ? "1" : "0";
+}
+
+function buildUnknownCommandMessage(input: string): string {
+  return [
+    "Perintah tidak dikenali.",
+    `Input: ${input}`,
+    "",
+    "Contoh yang benar:",
+    "• /extract https://example.com/artikel 1",
+    "• /subtitle https://www.youtube.com/watch?v=xxxx",
+    "• /runs 5",
+    "",
+    "Ketik /help atau /menu untuk daftar perintah lengkap.",
+  ].join("\n");
+}
+
+function renderField(label: string, value: string | number): string {
+  return `• ${label}: ${String(value)}`;
+}
+
+function buildStatusCard(
+  title: string,
+  fields: Array<{ label: string; value: string | number }>,
+  note?: string,
+): string {
+  const lines = [
+    title,
+    ...fields.map((field) => renderField(field.label, field.value)),
+  ];
+  if (note) {
+    lines.push("", note);
+  }
+  return lines.join("\n");
 }
 
 function subtitleButtonLabel(language: SubtitleLanguage): string {
@@ -774,11 +826,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
             const statusMessageId = await api.sendMessage(
               callbackChatId,
-              [
-                "⏳ [1/4] Menyiapkan subtitle",
-                `URL: ${session.url}`,
-                `Bahasa: ${callbackData.language}`,
-              ].join("\n"),
+              buildStatusCard("⏳ [1/4] Menyiapkan subtitle", [
+                { label: "URL", value: session.url },
+                { label: "Bahasa", value: callbackData.language },
+              ]),
             );
 
             let subtitleResult;
@@ -786,11 +837,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.editMessage(
                 callbackChatId,
                 statusMessageId,
-                [
-                  "⏳ [2/4] Mengunduh subtitle",
-                  `Judul: ${session.title}`,
-                  `Bahasa: ${callbackData.language}`,
-                ].join("\n"),
+                buildStatusCard("⏳ [2/4] Mengunduh subtitle", [
+                  { label: "Judul", value: session.title },
+                  { label: "Bahasa", value: callbackData.language },
+                ]),
               );
 
               subtitleResult = await downloadSubtitlesAndConvert(
@@ -803,12 +853,14 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.editMessage(
                 callbackChatId,
                 statusMessageId,
-                [
-                  "⏳ [3/4] Mengirim file subtitle",
-                  `Judul: ${subtitleResult.title}`,
-                  `Bahasa: ${subtitleResult.language}`,
-                  `Timestamp: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
-                ].join("\n"),
+                buildStatusCard("⏳ [3/4] Mengirim file subtitle", [
+                  { label: "Judul", value: subtitleResult.title },
+                  { label: "Bahasa", value: subtitleResult.language },
+                  {
+                    label: "Timestamp",
+                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                  },
+                ]),
               );
 
               const sent = await sendSubtitleFiles(api, callbackChatId, [
@@ -821,15 +873,17 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.editMessage(
                 callbackChatId,
                 statusMessageId,
-                [
-                  "✅ [4/4] Subtitle selesai",
-                  `Judul: ${subtitleResult.title}`,
-                  `Bahasa: ${subtitleResult.language}`,
-                  `Timestamp: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
-                  `Terkirim: ${sent.sent}`,
-                  `Gagal: ${sent.failed}`,
-                  `Folder: ${subtitleResult.outputDir}`,
-                ].join("\n"),
+                buildStatusCard("✅ [4/4] Subtitle selesai", [
+                  { label: "Judul", value: subtitleResult.title },
+                  { label: "Bahasa", value: subtitleResult.language },
+                  {
+                    label: "Timestamp",
+                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                  },
+                  { label: "File terkirim", value: sent.sent },
+                  { label: "File gagal", value: sent.failed },
+                  { label: "Folder output", value: subtitleResult.outputDir },
+                ]),
               );
               await logger.info("subtitle completed", {
                 chatId: callbackChatId,
@@ -844,7 +898,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.editMessage(
                 callbackChatId,
                 statusMessageId,
-                `❌ Subtitle gagal diproses\nDetail: ${errorMessage.slice(0, 350)}`,
+                buildStatusCard("❌ Subtitle gagal diproses", [
+                  { label: "Detail", value: errorMessage.slice(0, 350) },
+                ]),
               );
               await logger.error("subtitle callback failed", error, {
                 chatId: callbackChatId,
@@ -896,17 +952,25 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
           if (command.kind === "runs") {
             const runs = await readManifest(config.outputRoot);
-            const lines = runs
-              .slice(0, command.limit)
-              .map(
-                (run) =>
-                  `${run.id} | site=${run.site} | pages=${run.crawledPages} | md=${run.articleFiles}\n${run.rootUrl}`,
-              );
+            const selectedRuns = runs.slice(0, command.limit);
+            const lines = selectedRuns.map((run, index) =>
+              [
+                `${index + 1}. ${run.site}`,
+                `Run ID: ${run.id}`,
+                `Halaman dicrawl: ${run.crawledPages}`,
+                `File markdown: ${run.articleFiles}`,
+                `URL: ${run.rootUrl}`,
+              ].join("\n"),
+            );
 
             await api.sendMessage(
               chatId,
               lines.length > 0
-                ? lines.join("\n\n")
+                ? [
+                    `Riwayat extract (${selectedRuns.length}/${runs.length})`,
+                    "",
+                    lines.join("\n\n"),
+                  ].join("\n")
                 : "Belum ada history extract.",
             );
             await logger.info("runs sent", { chatId, count: lines.length });
@@ -918,7 +982,11 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               const enabled = isSubtitleTimestampEnabled();
               await api.sendMessage(
                 chatId,
-                `Subtitle timestamp: ${enabled ? "AKTIF" : "NONAKTIF"}\nEXTRACT_SUBTITLE_TIMESTAMP=${enabled ? "1" : "0"}`,
+                [
+                  "Status subtitle timestamp:",
+                  `• Mode: ${modeLabel(enabled)}`,
+                  `• EXTRACT_SUBTITLE_TIMESTAMP=${modeEnvValue(enabled)}`,
+                ].join("\n"),
               );
               continue;
             }
@@ -929,8 +997,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               chatId,
               [
                 `Subtitle timestamp berhasil di-${enabled ? "aktifkan" : "nonaktifkan"}.`,
-                `EXTRACT_SUBTITLE_TIMESTAMP=${enabled ? "1" : "0"}`,
-                `Tersimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
+                `Mode sekarang: ${modeLabel(enabled)}`,
+                `EXTRACT_SUBTITLE_TIMESTAMP=${modeEnvValue(enabled)}`,
+                `Disimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
               ].join("\n"),
             );
             await logger.info("subtitle timestamp mode changed", {
@@ -945,7 +1014,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             await api.sendChatAction(chatId, "typing");
             const statusMessageId = await api.sendMessage(
               chatId,
-              `⏳ [1/2] Mengecek subtitle\nURL: ${command.url}`,
+              buildStatusCard("⏳ [1/2] Mengecek subtitle", [
+                { label: "URL", value: command.url },
+              ]),
             );
             const listed = await listAvailableSubtitles(command.url);
             const resolvedOriginal = resolveOriginalLanguage(
@@ -961,11 +1032,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.editMessage(
                 chatId,
                 statusMessageId,
-                [
-                  "❌ Subtitle tidak tersedia.",
-                  `Judul: ${listed.title}`,
-                  `URL: ${listed.webpageUrl}`,
-                ].join("\n"),
+                buildStatusCard("❌ Subtitle tidak tersedia", [
+                  { label: "Judul", value: listed.title },
+                  { label: "URL", value: listed.webpageUrl },
+                ]),
               );
               continue;
             }
@@ -984,12 +1054,16 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               chatId,
               statusMessageId,
               [
-                "✅ [2/2] Subtitle ditemukan",
-                `Judul: ${listed.title}`,
-                `Extractor: ${listed.extractorKey}`,
-                `Original: ${resolvedOriginal ?? "-"}`,
-                `Ditampilkan: ${preferred.length} bahasa`,
-                `Timestamp saat ini: ${isSubtitleTimestampEnabled() ? "ON" : "OFF"}`,
+                buildStatusCard("✅ [2/2] Subtitle ditemukan", [
+                  { label: "Judul", value: listed.title },
+                  { label: "Extractor", value: listed.extractorKey },
+                  { label: "Bahasa original", value: resolvedOriginal ?? "-" },
+                  { label: "Bahasa ditampilkan", value: preferred.length },
+                  {
+                    label: "Timestamp saat ini",
+                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                  },
+                ]),
                 "",
                 "Bahasa pilihan (original/en/id):",
                 renderSubtitleLanguageList(preferred),
@@ -1017,7 +1091,11 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               const enabled = isBrowserFallbackEnabled();
               await api.sendMessage(
                 chatId,
-                `Browser fallback: ${enabled ? "AKTIF" : "NONAKTIF"}\nEXTRACT_BROWSER_FALLBACK=${enabled ? "1" : "0"}`,
+                [
+                  "Status browser fallback:",
+                  `• Mode: ${modeLabel(enabled)}`,
+                  `• EXTRACT_BROWSER_FALLBACK=${modeEnvValue(enabled)}`,
+                ].join("\n"),
               );
               continue;
             }
@@ -1028,8 +1106,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               chatId,
               [
                 `Browser fallback berhasil di-${enabled ? "aktifkan" : "nonaktifkan"}.`,
-                `EXTRACT_BROWSER_FALLBACK=${enabled ? "1" : "0"}`,
-                `Tersimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
+                `Mode sekarang: ${modeLabel(enabled)}`,
+                `EXTRACT_BROWSER_FALLBACK=${modeEnvValue(enabled)}`,
+                `Disimpan di ${config.envPath} dan langsung aktif di proses bot ini.`,
               ].join("\n"),
             );
             await logger.info("browser mode changed", {
@@ -1076,9 +1155,15 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             await api.sendChatAction(chatId, "typing");
             const statusMessageId = await api.sendMessage(
               chatId,
-              `⏳ [1/5] Memulai extract\nURL: ${command.url}\nmaxPages=${command.maxPages}`,
+              buildStatusCard("⏳ [1/5] Memulai extract", [
+                { label: "URL", value: command.url },
+                { label: "Maks halaman", value: command.maxPages },
+              ]),
             );
-            liveStatusText = `⏳ [1/5] Memulai extract\nURL: ${command.url}\nmaxPages=${command.maxPages}`;
+            liveStatusText = buildStatusCard("⏳ [1/5] Memulai extract", [
+              { label: "URL", value: command.url },
+              { label: "Maks halaman", value: command.maxPages },
+            ]);
             await logger.info("extract started", {
               chatId,
               url: command.url,
@@ -1094,7 +1179,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 const elapsed = Math.floor((now - extractStartedAt) / 1000);
                 await safeStatusUpdate(
                   statusMessageId,
-                  `${liveStatusText}\nSedang diproses... ${elapsed}s`,
+                  `${liveStatusText}\n${renderField("Durasi proses", `${elapsed}s`)}`,
                 );
               } catch {
                 // noop
@@ -1120,7 +1205,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     };
                     const prefix =
                       statusMap[progress.step] ?? "⏳ [..] Processing";
-                    const statusText = `${prefix}\n${progress.message}`;
+                    const statusText = buildStatusCard(prefix, [
+                      { label: "Detail", value: progress.message },
+                    ]);
                     liveStatusText = statusText;
                     lastProgressAt = Date.now();
                     await logger.info("extract progress", {
@@ -1140,20 +1227,28 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
             await safeStatusUpdate(
               statusMessageId,
-              "✅ Extract selesai, sedang mengirim file...",
+              buildStatusCard("✅ [5/5] Extract selesai", [
+                { label: "Status", value: "Sedang mengirim file hasil" },
+              ]),
             );
             await api.sendChatAction(chatId, "upload_document");
 
             await api.sendMessage(
               chatId,
-              [
-                `Selesai. Run ID: ${extraction.runId}`,
-                `Site: ${extraction.site}`,
-                `Crawled pages: ${extraction.result.crawledPages}`,
-                `Markdown files: ${extraction.markdownFiles.length}`,
-                `Text files: ${extraction.textFiles.length}`,
-                `Result: ${extraction.resultFile}`,
-              ].join("\n"),
+              buildStatusCard("Ringkasan hasil extract", [
+                { label: "Run ID", value: extraction.runId },
+                { label: "Site", value: extraction.site },
+                {
+                  label: "Halaman dicrawl",
+                  value: extraction.result.crawledPages,
+                },
+                {
+                  label: "File markdown",
+                  value: extraction.markdownFiles.length,
+                },
+                { label: "File text", value: extraction.textFiles.length },
+                { label: "Result JSON", value: extraction.resultFile },
+              ]),
             );
 
             try {
@@ -1194,11 +1289,16 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             );
             await safeStatusUpdate(
               statusMessageId,
-              [
-                "✅ [5/5] Proses selesai",
-                `File markdown terkirim: ${markdownStats.sent}, gagal: ${markdownStats.failed}`,
-                `File text terkirim: ${textStats.sent}, gagal: ${textStats.failed}`,
-              ].join("\n"),
+              buildStatusCard("✅ [5/5] Proses selesai", [
+                {
+                  label: "Markdown (terkirim/gagal)",
+                  value: `${markdownStats.sent}/${markdownStats.failed}`,
+                },
+                {
+                  label: "Text (terkirim/gagal)",
+                  value: `${textStats.sent}/${textStats.failed}`,
+                },
+              ]),
             );
             await logger.info("extract completed", {
               chatId,
@@ -1239,7 +1339,11 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             if (!document?.file_id) {
               await api.sendMessage(
                 chatId,
-                "Gunakan /cookieimport <domain> sebagai caption saat upload file cookies.txt",
+                [
+                  "Format belum tepat untuk import cookie domain spesifik.",
+                  "Gunakan /cookieimport <domain> di caption saat upload cookies.txt.",
+                  "Contoh: /cookieimport projectmultatuli.org",
+                ].join("\n"),
               );
               continue;
             }
@@ -1304,7 +1408,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             }
           }
 
-          await api.sendMessage(chatId, buildHelpMessage());
+          await api.sendMessage(
+            chatId,
+            buildUnknownCommandMessage(commandInput),
+          );
           await logger.warn("unknown command", { chatId, text: commandInput });
         } catch (error) {
           const chatId = update.message?.chat.id;
@@ -1317,7 +1424,12 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               error instanceof Error ? error.message : "Unknown error";
             await api.sendMessage(
               chatId,
-              `Terjadi error saat memproses perintah.\nDetail: ${errorMessage.slice(0, 350)}`,
+              [
+                "Terjadi error saat memproses perintah.",
+                `Detail: ${errorMessage.slice(0, 350)}`,
+                "",
+                "Coba ulangi perintah atau ketik /help untuk panduan.",
+              ].join("\n"),
             );
           }
         }

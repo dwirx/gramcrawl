@@ -62,6 +62,12 @@ describe("parseTelegramCommand", () => {
     expect(parsed.limit).toBe(5);
   });
 
+  test("parses /menu alias as help command", () => {
+    const parsed = parseTelegramCommand("/menu");
+
+    expect(parsed.kind).toBe("help");
+  });
+
   test("parses plain url as extract command", () => {
     const parsed = parseTelegramCommand("https://example.com/article");
 
