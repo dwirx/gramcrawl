@@ -255,6 +255,47 @@ describe("markdown helpers", () => {
     expect(markdown).toContain("_Gambar 1: Caption A_");
   });
 
+  test("buildMarkdownFromBlocks renders structured markdown by tag", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "h2", text: "Bagian A" },
+      { type: "text", tag: "blockquote", text: "CLI lebih murah." },
+      { type: "text", tag: "pre", text: "echo hello\necho world" },
+      { type: "text", tag: "li", text: "Poin pertama" },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain("## Bagian A");
+    expect(markdown).toContain("> CLI lebih murah.");
+    expect(markdown).toContain("```\necho hello\necho world\n```");
+    expect(markdown).toContain("- Poin pertama");
+  });
+
+  test("buildMarkdownFromBlocks renders table block as markdown table", () => {
+    const table = [
+      "| Tools used    | MCP     | CLI    | Savings |",
+      "| :------------ | :------ | :----- | :------ |",
+      "| Session start | ~15,540 | ~300   | 98%     |",
+      "| 1 tool        | ~15,570 | ~910   | 94%     |",
+    ].join("\n");
+
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "table", text: table },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain(
+      "| Tools used    | MCP     | CLI    | Savings |",
+    );
+    expect(markdown).toContain(
+      "| :------------ | :------ | :----- | :------ |",
+    );
+    expect(markdown).toContain(
+      "| Session start | ~15,540 | ~300   | 98%     |",
+    );
+  });
+
   test("buildArticleText returns plain text output", () => {
     const textOutput = buildArticleText(
       {
@@ -282,7 +323,9 @@ describe("markdown helpers", () => {
     expect(textOutput).toContain("_Ini ringkasan_");
     expect(textOutput).toContain("Paragraf pertama.");
     expect(textOutput).toContain("Paragraf kedua.");
-    expect(textOutput).toContain("[IMAGE 1] https://example.com/image-a.jpg");
-    expect(textOutput).toContain("CAPTION: Caption A");
+    expect(textOutput).toContain(
+      "![Gambar A](https://example.com/image-a.jpg)",
+    );
+    expect(textOutput).toContain("_Gambar 1: Caption A_");
   });
 });

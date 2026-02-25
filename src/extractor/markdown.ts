@@ -153,16 +153,12 @@ export function buildMarkdownFromBlocks(blocks: ContentBlock[]): string {
   let imageIndex = 0;
   for (const block of filteredBlocks) {
     if (block.type === "text") {
-      const text = normalizeWhitespace(block.text);
-
-      if (text) {
-        lines.push(text, "");
-      }
+      renderTextBlockMarkdown(lines, block.tag, block.text);
       continue;
     }
 
     imageIndex += 1;
-    const alt = normalizeWhitespace(block.alt) || "image";
+    const alt = normalizeWhitespace(block.alt) || "img";
     const caption = normalizeWhitespace(block.caption);
 
     lines.push(`![${alt}](${block.src})`, "");
@@ -171,12 +167,71 @@ export function buildMarkdownFromBlocks(blocks: ContentBlock[]): string {
         `_Gambar ${imageIndex}: ${formatCaptionMarkdown(caption)}_`,
         "",
       );
-    } else {
-      lines.push(`_Gambar ${imageIndex}_`, "");
     }
   }
 
   return lines.join("\n").trim();
+}
+
+function renderTextBlockMarkdown(
+  lines: string[],
+  tag: string,
+  rawText: string,
+): void {
+  const normalizedTag = tag.toLowerCase();
+  if (normalizedTag === "table") {
+    const tableBlock = rawText.replaceAll(/\r\n/g, "\n").trim();
+    if (!tableBlock) {
+      return;
+    }
+    lines.push(tableBlock, "");
+    return;
+  }
+
+  if (normalizedTag === "hr") {
+    lines.push("------", "");
+    return;
+  }
+
+  if (normalizedTag === "pre") {
+    const codeBlock = rawText.replaceAll(/\r\n/g, "\n").trim();
+    if (!codeBlock) {
+      return;
+    }
+    const fence = codeBlock.includes("```") ? "````" : "```";
+    lines.push(fence, codeBlock, fence, "");
+    return;
+  }
+
+  const normalized = normalizeWhitespace(rawText);
+  if (!normalized) {
+    return;
+  }
+
+  if (/^h[1-6]$/.test(normalizedTag)) {
+    const level = Number(normalizedTag[1] ?? "2");
+    const headingLevel = Math.max(2, Math.min(6, level));
+    lines.push(`${"#".repeat(headingLevel)} ${normalized}`, "");
+    return;
+  }
+
+  if (normalizedTag === "blockquote") {
+    const quoteLines = normalized
+      .split(/\r?\n/)
+      .map((line) => normalizeWhitespace(line))
+      .filter(Boolean);
+    if (quoteLines.length > 0) {
+      lines.push(...quoteLines.map((line) => `> ${line}`), "");
+    }
+    return;
+  }
+
+  if (normalizedTag === "li") {
+    lines.push(`- ${normalized}`, "");
+    return;
+  }
+
+  lines.push(normalized, "");
 }
 
 function buildTextFromBlocks(
@@ -194,28 +249,19 @@ function buildTextFromBlocks(
 
   for (const block of filteredBlocks) {
     if (block.type === "text") {
-      const text = normalizeWhitespace(block.text);
-      if (text) {
-        lines.push(text, "");
-      }
+      renderTextBlockMarkdown(lines, block.tag, block.text);
       continue;
     }
 
     imageIndex += 1;
-    const src = normalizeWhitespace(block.src);
-    const alt = normalizeWhitespace(block.alt);
+    const src = normalizeWhitespace(block.src) || "image";
+    const alt = normalizeWhitespace(block.alt) || "img";
     const caption = normalizeWhitespace(block.caption);
 
-    lines.push(`[IMAGE ${imageIndex}] ${src}`);
-
-    if (alt) {
-      lines.push(`ALT: ${alt}`);
-    }
-
+    lines.push(`![${alt}](${src})`);
     if (caption) {
-      lines.push(`CAPTION: ${caption}`);
+      lines.push(`_Gambar ${imageIndex}: ${caption}_`);
     }
-
     lines.push("");
   }
 
@@ -235,7 +281,12 @@ function filterRenderableBlocks(blocks: ContentBlock[]): ContentBlock[] {
     }
 
     if (block.type === "text") {
-      const text = normalizeWhitespace(block.text);
+      const normalizedTag = block.tag.toLowerCase();
+      const isPreformatted =
+        normalizedTag === "pre" || normalizedTag === "table";
+      const text = isPreformatted
+        ? block.text.replaceAll(/\r\n/g, "\n").trim()
+        : normalizeWhitespace(block.text);
       if (!text || isUiNoiseLine(text)) {
         continue;
       }

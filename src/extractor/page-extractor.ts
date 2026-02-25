@@ -15,6 +15,7 @@ type CheerioCollection = {
   map<T>(callback: (index: number, element: unknown) => T): { get(): T[] };
   toArray(): unknown[];
   find(selector: string): CheerioCollection;
+  closest(selector: string): CheerioCollection;
   remove(): void;
 };
 
@@ -108,22 +109,37 @@ function tagNameOf(element: unknown): string {
 }
 
 function extractArticleTitle($: CheerioApi, fallbackTitle: string): string {
-  const candidates = [
-    "article h1",
-    "main h1",
-    "h1",
-    "meta[property='og:title']",
-    "title",
-  ];
+  const readTexts = (selector: string): string[] =>
+    $(selector)
+      .map((_, element) => normalizeWhitespace($(element).text()))
+      .get()
+      .filter((text) => text.length > 0);
 
-  for (const selector of candidates) {
-    const value = selector.startsWith("meta[")
-      ? normalizeWhitespace($(selector).first().attr("content") ?? "")
-      : normalizeWhitespace($(selector).first().text());
+  const fromArticle = readTexts("article h1")[0];
+  if (fromArticle) {
+    return fromArticle;
+  }
 
-    if (value) {
-      return value;
-    }
+  const fromMain = readTexts("main h1")[0];
+  if (fromMain) {
+    return fromMain;
+  }
+
+  const allH1 = readTexts("h1");
+  if (allH1.length > 0) {
+    return [...allH1].sort((a, b) => b.length - a.length)[0] ?? fallbackTitle;
+  }
+
+  const fromOg = normalizeWhitespace(
+    $("meta[property='og:title']").first().attr("content") ?? "",
+  );
+  if (fromOg) {
+    return fromOg;
+  }
+
+  const fromTitleTag = normalizeWhitespace($("title").first().text());
+  if (fromTitleTag) {
+    return fromTitleTag;
   }
 
   return fallbackTitle;
@@ -173,13 +189,140 @@ function pickContentRoot($: CheerioApi): CheerioCollection {
   return $(bestSelector).first();
 }
 
+function escapeTableCell(value: string): string {
+  return value.replaceAll("|", "\\|").trim();
+}
+
+function buildMarkdownTable(rows: string[][]): string {
+  if (rows.length === 0) {
+    return "";
+  }
+
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  if (width <= 0) {
+    return "";
+  }
+
+  const normalizedRows = rows.map((row) => {
+    const out = [...row];
+    while (out.length < width) {
+      out.push("");
+    }
+    return out;
+  });
+
+  const toLine = (row: string[]): string =>
+    `| ${row.map((cell) => escapeTableCell(cell)).join(" | ")} |`;
+
+  const header = normalizedRows[0] ?? [];
+  const body = normalizedRows.slice(1);
+  const separator = `| ${Array.from({ length: width }, () => ":---").join(" | ")} |`;
+
+  return [toLine(header), separator, ...body.map(toLine)].join("\n");
+}
+
+function replaceFirstOccurrence(
+  input: string,
+  needle: string,
+  replacement: string,
+): string {
+  if (!needle) {
+    return input;
+  }
+
+  const index = input.indexOf(needle);
+  if (index < 0) {
+    return input;
+  }
+
+  return `${input.slice(0, index)}${replacement}${input.slice(index + needle.length)}`;
+}
+
+function normalizeInlineHref(
+  href: string,
+  currentPageUrl: URL,
+  rootUrl: URL,
+): string {
+  const scoped = normalizeScopedUrl(href, currentPageUrl, rootUrl);
+  if (scoped) {
+    return scoped;
+  }
+
+  try {
+    return new URL(href, currentPageUrl).toString();
+  } catch {
+    return href;
+  }
+}
+
+function normalizeMediaSrc(src: string, currentPageUrl: URL): string {
+  try {
+    return new URL(src, currentPageUrl).toString();
+  } catch {
+    return src;
+  }
+}
+
+function extractTextWithInlineFormatting(
+  node: unknown,
+  $: CheerioApi,
+  currentPageUrl: URL,
+  rootUrl: URL,
+): string {
+  let text = normalizeWhitespace($(node).text());
+  if (!text) {
+    return "";
+  }
+
+  const anchors = $(node).find("a[href]").toArray();
+  for (const anchor of anchors) {
+    const label = normalizeWhitespace($(anchor).text());
+    const hrefRaw = normalizeWhitespace($(anchor).attr("href") ?? "");
+    if (!label || !hrefRaw) {
+      continue;
+    }
+
+    const href = normalizeInlineHref(hrefRaw, currentPageUrl, rootUrl);
+    text = replaceFirstOccurrence(text, label, `[${label}](${href})`);
+  }
+
+  const inlineCodeNodes = $(node).find("code").toArray();
+  for (const codeNode of inlineCodeNodes) {
+    const codeText = normalizeWhitespace($(codeNode).text());
+    if (!codeText) {
+      continue;
+    }
+
+    text = replaceFirstOccurrence(text, codeText, `\`${codeText}\``);
+  }
+
+  return text;
+}
+
+function extractTableMarkdown(node: unknown, $: CheerioApi): string {
+  const rows = $(node)
+    .find("tr")
+    .toArray()
+    .map((row) => {
+      return $(row)
+        .find("th,td")
+        .toArray()
+        .map((cell) => normalizeWhitespace($(cell).text()));
+    })
+    .filter((cells) => cells.some((cell) => cell.length > 0));
+
+  return buildMarkdownTable(rows);
+}
+
 function extractOrderedBlocks(
   root: CheerioCollection,
   $: CheerioApi,
   articleTitle: string,
+  currentPageUrl: URL,
+  rootUrl: URL,
 ): ContentBlock[] {
   const nodes = root
-    .find("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, img")
+    .find("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, table, hr, img")
     .toArray();
   const blocks: ContentBlock[] = [];
 
@@ -187,6 +330,13 @@ function extractOrderedBlocks(
     const tagName = tagNameOf(node);
 
     if (!tagName) {
+      continue;
+    }
+
+    const insideNavLike = $(node)
+      .closest("nav, header, footer")
+      .toArray().length;
+    if (insideNavLike > 0) {
       continue;
     }
 
@@ -204,14 +354,43 @@ function extractOrderedBlocks(
       const alt = normalizeWhitespace($(node).attr("alt") ?? "");
       blocks.push({
         type: "image",
-        src,
+        src: normalizeMediaSrc(src, currentPageUrl),
         alt,
-        caption: alt,
+        caption: "",
       });
       continue;
     }
 
-    const text = normalizeWhitespace($(node).text());
+    if (tagName === "table") {
+      const tableMarkdown = extractTableMarkdown(node, $);
+      if (!tableMarkdown) {
+        continue;
+      }
+      blocks.push({
+        type: "text",
+        tag: "table",
+        text: tableMarkdown,
+      });
+      continue;
+    }
+
+    if (tagName === "hr") {
+      blocks.push({
+        type: "text",
+        tag: "hr",
+        text: "------",
+      });
+      continue;
+    }
+
+    const text =
+      tagName === "pre"
+        ? $(node)
+            .text()
+            .replaceAll(/\u00a0/g, " ")
+            .replaceAll(/\r\n/g, "\n")
+            .trim()
+        : extractTextWithInlineFormatting(node, $, currentPageUrl, rootUrl);
 
     if (!text || shouldSkipText(text)) {
       continue;
@@ -305,7 +484,13 @@ export function extractPageFromHtml(
   }
 
   const root = pickContentRoot($);
-  const contentBlocks = extractOrderedBlocks(root, $, articleTitle);
+  const contentBlocks = extractOrderedBlocks(
+    root,
+    $,
+    articleTitle,
+    currentPageUrl,
+    rootUrl,
+  );
 
   const articleBodyText = contentBlocks
     .filter((block) => block.type === "text")

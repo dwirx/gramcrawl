@@ -6,6 +6,7 @@ type CheerioCollection = {
   map<T>(callback: (index: number, element: unknown) => T): { get(): T[] };
   toArray(): unknown[];
   find(selector: string): CheerioCollection;
+  closest(selector: string): CheerioCollection;
   remove(): void;
 };
 
