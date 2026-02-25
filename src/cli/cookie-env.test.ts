@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  extractCookieHeaderFromAnyFormat,
+  extractCookieHeaderFromBrowserJson,
   extractCookieHeaderFromNetscape,
+  extractCookieMapFromBrowserJson,
   extractCookieMapFromNetscape,
   hasCookieName,
   writeCookieToEnv,
@@ -57,6 +60,73 @@ describe("extractCookieMapFromNetscape", () => {
     expect(map["projectmultatuli.org"]).toContain("cf_clearance=abc123");
     expect(map["projectmultatuli.org"]).toContain("__cf_bm=def456");
     expect(map["example.com"]).toContain("session=zzz");
+  });
+});
+
+describe("extractCookieHeaderFromBrowserJson", () => {
+  test("reads cookie header for matching domain in json export", () => {
+    const raw = JSON.stringify([
+      {
+        domain: ".scribd.com",
+        name: "scribd_ubtc",
+        value: "token123",
+        expirationDate: 9999999999,
+      },
+      {
+        domain: ".id.scribd.com",
+        name: "session_id",
+        value: "abc456",
+        expirationDate: 9999999999,
+      },
+      {
+        domain: ".example.com",
+        name: "sid",
+        value: "zzz",
+        expirationDate: 9999999999,
+      },
+    ]);
+
+    const cookie = extractCookieHeaderFromBrowserJson(raw, "id.scribd.com");
+
+    expect(cookie).toContain("scribd_ubtc=token123");
+    expect(cookie).toContain("session_id=abc456");
+    expect(cookie).not.toContain("sid=zzz");
+  });
+});
+
+describe("extractCookieMapFromBrowserJson", () => {
+  test("builds cookie map from cookies array object format", () => {
+    const raw = JSON.stringify({
+      cookies: [
+        {
+          host: ".scribd.com",
+          name: "scribd_ubtc",
+          value: "token123",
+          expiresDate: 9999999999,
+        },
+      ],
+    });
+
+    const map = extractCookieMapFromBrowserJson(raw);
+
+    expect(map["scribd.com"]).toContain("scribd_ubtc=token123");
+  });
+});
+
+describe("extractCookieHeaderFromAnyFormat", () => {
+  test("falls back to json when netscape format not present", () => {
+    const raw = JSON.stringify([
+      {
+        domain: ".scribd.com",
+        name: "scribd_ubtc",
+        value: "token123",
+        expirationDate: 9999999999,
+      },
+    ]);
+
+    const cookie = extractCookieHeaderFromAnyFormat(raw, "scribd.com");
+
+    expect(cookie).toContain("scribd_ubtc=token123");
   });
 });
 

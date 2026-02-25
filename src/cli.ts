@@ -1,6 +1,6 @@
 import { parseCliArgs, formatCliError } from "./cli/parse-args";
 import {
-  extractCookieHeaderFromNetscape,
+  extractCookieHeaderFromAnyFormat,
   hasCookieName,
   writeCookieToEnv,
 } from "./cli/cookie-env";
@@ -13,6 +13,7 @@ import {
   pickPreferredSubtitleLanguages,
   resolveOriginalLanguage,
 } from "./subtitle/service";
+import { runScribdBrowserDownload } from "./scribd/browser-download";
 
 async function writeLine(value: string): Promise<void> {
   await Bun.write(Bun.stdout, `${value}\n`);
@@ -61,6 +62,47 @@ async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command.command === "scribd") {
+    const hostname = new URL(command.url).hostname.toLowerCase();
+    if (hostname !== "scribd.com" && !hostname.endsWith(".scribd.com")) {
+      throw new Error(
+        "Command scribd hanya untuk URL Scribd. Gunakan command extract untuk domain lain.",
+      );
+    }
+
+    const extraction = await runExtraction({
+      rootUrl: command.url,
+      maxPages: 1,
+      outputRoot: command.outputRoot,
+    });
+
+    await writeLine(`Run ID: ${extraction.runId}`);
+    await writeLine(`Site: ${extraction.site}`);
+    await writeLine(`Crawled pages: ${extraction.result.crawledPages}`);
+    await writeLine(`Markdown files: ${extraction.markdownFiles.length}`);
+    await writeLine(`Text files: ${extraction.textFiles.length}`);
+    await writeLine(`Result JSON: ${extraction.resultFile}`);
+    return;
+  }
+
+  if (command.command === "scribd-browser") {
+    await writeLine(
+      `Membuka browser Scribd (mode login manual). Format target: ${command.format}. Setelah login, sistem akan klik download otomatis jika tombol tersedia.`,
+    );
+
+    const downloaded = await runScribdBrowserDownload({
+      url: command.url,
+      outputRoot: command.outputRoot,
+      waitMs: command.waitMs,
+      format: command.format,
+    });
+
+    await writeLine(`File: ${downloaded.fileName}`);
+    await writeLine(`Saved: ${downloaded.savedPath}`);
+    await writeLine(`Output dir: ${downloaded.outputDir}`);
+    return;
+  }
+
   if (command.command === "list") {
     const runs = await readManifest(command.outputRoot);
     const displayed = runs.slice(0, command.limit);
@@ -81,7 +123,7 @@ async function runCli(argv: string[]): Promise<void> {
 
   if (command.command === "cookie-import") {
     const raw = await Bun.file(command.cookiesFile).text();
-    const cookie = extractCookieHeaderFromNetscape(raw, command.domain);
+    const cookie = extractCookieHeaderFromAnyFormat(raw, command.domain);
 
     if (!cookie) {
       throw new Error(

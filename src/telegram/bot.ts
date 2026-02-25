@@ -58,6 +58,11 @@ type TelegramChatAction = "typing" | "upload_document";
 type TelegramInlineKeyboardMarkup = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
 };
+type MainMenuAction = "extract" | "subtitle" | "runs" | "settings" | "help";
+type TelegramBotCommand = {
+  command: string;
+  description: string;
+};
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_MAX_RETRIES = 3;
 const SUBTITLE_SESSION_TTL_MS = 15 * 60 * 1_000;
@@ -269,6 +274,12 @@ class TelegramApi {
       ...(text ? { text } : {}),
     });
   }
+
+  async setMyCommands(commands: TelegramBotCommand[]): Promise<void> {
+    await this.requestJson<unknown>("setMyCommands", {
+      commands,
+    });
+  }
 }
 
 function buildHelpMessage(): string {
@@ -278,6 +289,9 @@ function buildHelpMessage(): string {
     "Perintah utama:",
     "• /extract <url> [maxPages]",
     "  Ekstrak website ke JSON + Markdown + TXT.",
+    "• /scribd <url-scribd>",
+    "  Shortcut extract 1 halaman khusus Scribd.",
+    "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
     "• /subtitle <url>",
     "  Ambil subtitle YouTube (pilih bahasa lewat tombol).",
     "• /runs [limit]",
@@ -300,6 +314,72 @@ function buildHelpMessage(): string {
   ].join("\n");
 }
 
+function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
+  return [
+    { command: "start", description: "Buka menu utama bot" },
+    { command: "help", description: "Lihat bantuan lengkap" },
+    {
+      command: "extract",
+      description: "Ekstrak halaman web: /extract <url> [maxPages]",
+    },
+    {
+      command: "scribd",
+      description: "Extract cepat Scribd: /scribd <url-scribd>",
+    },
+    {
+      command: "subtitle",
+      description: "Ambil subtitle YouTube: /subtitle <url>",
+    },
+    { command: "runs", description: "Lihat riwayat extract terbaru" },
+    {
+      command: "browser",
+      description: "Status/ubah browser fallback: on|off|status",
+    },
+    {
+      command: "subtitletimestamp",
+      description: "Status/ubah timestamp subtitle: on|off|status",
+    },
+    {
+      command: "cookieimport",
+      description: "Import cookie dari cookies.txt per domain",
+    },
+    {
+      command: "cookieset",
+      description: "Set cookie header manual per domain",
+    },
+  ];
+}
+
+function buildWelcomeMenuMessage(): string {
+  return [
+    "TeleExtract Bot - Menu Utama",
+    "",
+    "Pilih aksi dari tombol di bawah:",
+    "• Extract artikel website",
+    "• Ambil subtitle YouTube",
+    "• Lihat riwayat run",
+    "• Cek status pengaturan",
+    "",
+    "Tips: Anda juga bisa kirim URL langsung untuk extract cepat.",
+  ].join("\n");
+}
+
+function buildMainMenuKeyboard(): TelegramInlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Extract", callback_data: "menu:extract" },
+        { text: "Subtitle", callback_data: "menu:subtitle" },
+      ],
+      [
+        { text: "Runs", callback_data: "menu:runs" },
+        { text: "Settings", callback_data: "menu:settings" },
+      ],
+      [{ text: "Help", callback_data: "menu:help" }],
+    ],
+  };
+}
+
 function modeLabel(enabled: boolean): string {
   return enabled ? "AKTIF" : "NONAKTIF";
 }
@@ -315,11 +395,58 @@ function buildUnknownCommandMessage(input: string): string {
     "",
     "Contoh yang benar:",
     "• /extract https://example.com/artikel 1",
+    "• /scribd https://www.scribd.com/document/123456789/judul",
     "• /subtitle https://www.youtube.com/watch?v=xxxx",
     "• /runs 5",
     "",
     "Ketik /help atau /menu untuk daftar perintah lengkap.",
   ].join("\n");
+}
+
+function parseMainMenuCallbackData(
+  value: string | undefined,
+): MainMenuAction | null {
+  if (!value || !value.startsWith("menu:")) {
+    return null;
+  }
+
+  const action = value.slice("menu:".length);
+  if (
+    action === "extract" ||
+    action === "subtitle" ||
+    action === "runs" ||
+    action === "settings" ||
+    action === "help"
+  ) {
+    return action;
+  }
+
+  return null;
+}
+
+function buildMenuActionMessage(action: MainMenuAction): string {
+  if (action === "extract") {
+    return [
+      "Panduan cepat Extract:",
+      "• /extract <url> [maxPages]",
+      "• Contoh: /extract https://example.com/artikel 1",
+      "• /scribd <url-scribd> (khusus Scribd)",
+      "",
+      "Anda juga bisa kirim URL langsung tanpa command.",
+    ].join("\n");
+  }
+
+  if (action === "subtitle") {
+    return [
+      "Panduan cepat Subtitle:",
+      "• /subtitle <url-youtube>",
+      "• Contoh: /subtitle https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "",
+      "Bot akan menampilkan tombol pilihan bahasa subtitle.",
+    ].join("\n");
+  }
+
+  return "";
 }
 
 function renderField(label: string, value: string | number): string {
@@ -412,6 +539,40 @@ function parseSubtitleCallbackData(
     sessionId,
     language: decodeURIComponent(encodedLanguage),
   };
+}
+
+function buildRunsMessage(
+  runs: Awaited<ReturnType<typeof readManifest>>,
+  limit: number,
+): string {
+  const selectedRuns = runs.slice(0, limit);
+  const lines = selectedRuns.map((run, index) =>
+    [
+      `${index + 1}. ${run.site}`,
+      `Run ID: ${run.id}`,
+      `Halaman dicrawl: ${run.crawledPages}`,
+      `File markdown: ${run.articleFiles}`,
+      `URL: ${run.rootUrl}`,
+    ].join("\n"),
+  );
+
+  return lines.length > 0
+    ? [
+        `Riwayat extract (${selectedRuns.length}/${runs.length})`,
+        "",
+        lines.join("\n\n"),
+      ].join("\n")
+    : "Belum ada history extract.";
+}
+
+function buildSettingsStatusMessage(): string {
+  const subtitleTimestampEnabled = isSubtitleTimestampEnabled();
+  const browserFallbackEnabled = isBrowserFallbackEnabled();
+  return [
+    "Status pengaturan bot:",
+    `• Subtitle timestamp: ${modeLabel(subtitleTimestampEnabled)} (EXTRACT_SUBTITLE_TIMESTAMP=${modeEnvValue(subtitleTimestampEnabled)})`,
+    `• Browser fallback: ${modeLabel(browserFallbackEnabled)} (EXTRACT_BROWSER_FALLBACK=${modeEnvValue(browserFallbackEnabled)})`,
+  ].join("\n");
 }
 
 function countryCodeToFlagEmoji(countryCode: string): string {
@@ -602,6 +763,148 @@ function buildSendFileName(path: string, fallbackBaseName: string): string {
   return `${articleSlug}.${ext}`;
 }
 
+function isScribdSite(site: string): boolean {
+  const normalized = site.toLowerCase();
+  return normalized === "scribd.com" || normalized.endsWith(".scribd.com");
+}
+
+function replaceFileExtension(path: string, nextExtension: string): string {
+  if (path.includes(".")) {
+    return path.replace(/\.[^.]+$/u, nextExtension);
+  }
+  return `${path}${nextExtension}`;
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+async function exportTextToDocx(textPath: string): Promise<string> {
+  const outputPath = replaceFileExtension(textPath, ".docx");
+  const rawText = await Bun.file(textPath).text();
+  const lines = rawText.replaceAll(/\r\n/g, "\n").split("\n");
+
+  const { Document, Packer, Paragraph, TextRun } = await import("docx");
+  const paragraphs = lines.map(
+    (line) => new Paragraph({ children: [new TextRun(line)] }),
+  );
+  const doc = new Document({
+    sections: [
+      {
+        children: paragraphs.length > 0 ? paragraphs : [new Paragraph("")],
+      },
+    ],
+  });
+  const buffer = await Packer.toBuffer(doc);
+  await Bun.write(outputPath, buffer);
+  return outputPath;
+}
+
+async function exportTextToPdf(textPath: string): Promise<string> {
+  const outputPath = replaceFileExtension(textPath, ".pdf");
+  const rawText = await Bun.file(textPath).text();
+  const html = [
+    "<!doctype html>",
+    "<html><head><meta charset='utf-8'>",
+    "<style>",
+    "body { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.45; margin: 24px; }",
+    "pre { white-space: pre-wrap; word-wrap: break-word; }",
+    "</style>",
+    "</head><body>",
+    `<pre>${escapeHtml(rawText)}</pre>`,
+    "</body></html>",
+  ].join("");
+
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "domcontentloaded" });
+    await page.pdf({
+      path: outputPath,
+      format: "A4",
+      printBackground: true,
+      margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
+    });
+  } finally {
+    await browser.close();
+  }
+
+  return outputPath;
+}
+
+async function sendScribdExportFiles(
+  api: TelegramApi,
+  logger: ReturnType<typeof createLogger>,
+  chatId: number,
+  textFiles: string[],
+  onStatus?: (text: string) => Promise<void>,
+): Promise<{
+  docx: { sent: number; failed: number };
+  pdf: { sent: number; failed: number };
+  sourceTextFiles: number;
+}> {
+  const sourceFiles = textFiles.slice(0, 3);
+  const docxFiles: string[] = [];
+  const pdfFiles: string[] = [];
+
+  for (const textPath of sourceFiles) {
+    try {
+      const file = Bun.file(textPath);
+      if (!(await file.exists())) {
+        continue;
+      }
+      docxFiles.push(await exportTextToDocx(textPath));
+    } catch (error) {
+      await logger.warn("scribd docx export failed", {
+        chatId,
+        textPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      const file = Bun.file(textPath);
+      if (!(await file.exists())) {
+        continue;
+      }
+      pdfFiles.push(await exportTextToPdf(textPath));
+    } catch (error) {
+      await logger.warn("scribd pdf export failed", {
+        chatId,
+        textPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const docxStats = await sendFilesBatch(
+    api,
+    logger,
+    chatId,
+    "DOCX",
+    docxFiles,
+    onStatus,
+  );
+  const pdfStats = await sendFilesBatch(
+    api,
+    logger,
+    chatId,
+    "PDF",
+    pdfFiles,
+    onStatus,
+  );
+
+  return {
+    docx: docxStats,
+    pdf: pdfStats,
+    sourceTextFiles: sourceFiles.length,
+  };
+}
+
 async function autoImportCookieDocument(
   api: TelegramApi,
   logger: ReturnType<typeof createLogger>,
@@ -768,6 +1071,14 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
     outputRoot: config.outputRoot,
     token: tokenHint,
   });
+  try {
+    await api.setMyCommands(buildTelegramCommandSuggestions());
+    await logger.info("telegram command suggestions synced");
+  } catch (error) {
+    await logger.warn("failed to sync telegram command suggestions", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -785,6 +1096,45 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
           const callback = update.callback_query;
           if (callback) {
+            const menuAction = parseMainMenuCallbackData(callback.data);
+            if (menuAction) {
+              const callbackChatId = callback.message?.chat.id;
+              if (!callbackChatId) {
+                await api.answerCallbackQuery(
+                  callback.id,
+                  "Chat tidak tersedia.",
+                );
+                continue;
+              }
+
+              await api.answerCallbackQuery(callback.id, "Diproses...");
+              if (menuAction === "help") {
+                await api.sendMessage(
+                  callbackChatId,
+                  buildHelpMessage(),
+                  buildMainMenuKeyboard(),
+                );
+              } else if (menuAction === "runs") {
+                const runs = await readManifest(config.outputRoot);
+                await api.sendMessage(
+                  callbackChatId,
+                  buildRunsMessage(runs, 5),
+                );
+              } else if (menuAction === "settings") {
+                await api.sendMessage(
+                  callbackChatId,
+                  buildSettingsStatusMessage(),
+                );
+              } else {
+                await api.sendMessage(
+                  callbackChatId,
+                  buildMenuActionMessage(menuAction),
+                  buildMainMenuKeyboard(),
+                );
+              }
+              continue;
+            }
+
             const callbackData = parseSubtitleCallbackData(callback.data);
             if (!callbackData) {
               await api.answerCallbackQuery(callback.id, "Aksi tidak dikenal.");
@@ -944,36 +1294,35 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
 
           await logger.info("message received", { chatId, text: commandInput });
           const command = parseTelegramCommand(commandInput);
+          const commandRoot = commandInput.split(/\s+/)[0]?.toLowerCase() ?? "";
 
           if (command.kind === "help") {
-            await api.sendMessage(chatId, buildHelpMessage());
+            if (commandRoot === "/start" || commandRoot === "/menu") {
+              await api.sendMessage(
+                chatId,
+                buildWelcomeMenuMessage(),
+                buildMainMenuKeyboard(),
+              );
+              continue;
+            }
+            await api.sendMessage(
+              chatId,
+              buildHelpMessage(),
+              buildMainMenuKeyboard(),
+            );
             continue;
           }
 
           if (command.kind === "runs") {
             const runs = await readManifest(config.outputRoot);
-            const selectedRuns = runs.slice(0, command.limit);
-            const lines = selectedRuns.map((run, index) =>
-              [
-                `${index + 1}. ${run.site}`,
-                `Run ID: ${run.id}`,
-                `Halaman dicrawl: ${run.crawledPages}`,
-                `File markdown: ${run.articleFiles}`,
-                `URL: ${run.rootUrl}`,
-              ].join("\n"),
-            );
-
             await api.sendMessage(
               chatId,
-              lines.length > 0
-                ? [
-                    `Riwayat extract (${selectedRuns.length}/${runs.length})`,
-                    "",
-                    lines.join("\n\n"),
-                  ].join("\n")
-                : "Belum ada history extract.",
+              buildRunsMessage(runs, command.limit),
             );
-            await logger.info("runs sent", { chatId, count: lines.length });
+            await logger.info("runs sent", {
+              chatId,
+              count: Math.min(runs.length, command.limit),
+            });
             continue;
           }
 
@@ -1287,6 +1636,31 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               extraction.textFiles,
               (textValue) => safeStatusUpdate(statusMessageId, textValue),
             );
+            let scribdStats: {
+              docx: { sent: number; failed: number };
+              pdf: { sent: number; failed: number };
+              sourceTextFiles: number;
+            } | null = null;
+
+            if (
+              isScribdSite(extraction.site) &&
+              extraction.textFiles.length > 0
+            ) {
+              await safeStatusUpdate(
+                statusMessageId,
+                buildStatusCard("⏳ [5/5] Menyiapkan file Scribd", [
+                  { label: "Status", value: "Konversi ke DOCX dan PDF" },
+                ]),
+              );
+              scribdStats = await sendScribdExportFiles(
+                api,
+                logger,
+                chatId,
+                extraction.textFiles,
+                (textValue) => safeStatusUpdate(statusMessageId, textValue),
+              );
+            }
+
             await safeStatusUpdate(
               statusMessageId,
               buildStatusCard("✅ [5/5] Proses selesai", [
@@ -1298,6 +1672,18 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   label: "Text (terkirim/gagal)",
                   value: `${textStats.sent}/${textStats.failed}`,
                 },
+                ...(scribdStats
+                  ? [
+                      {
+                        label: "DOCX (terkirim/gagal)",
+                        value: `${scribdStats.docx.sent}/${scribdStats.docx.failed}`,
+                      },
+                      {
+                        label: "PDF (terkirim/gagal)",
+                        value: `${scribdStats.pdf.sent}/${scribdStats.pdf.failed}`,
+                      },
+                    ]
+                  : []),
               ]),
             );
             await logger.info("extract completed", {

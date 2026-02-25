@@ -1,11 +1,26 @@
 import { z } from "zod";
 
 const PositiveInt = z.coerce.number().int().positive();
+const ScribdFormat = z.enum(["pdf", "docx", "txt"]);
 
 export const ExtractCommandSchema = z.object({
   command: z.literal("extract"),
   url: z.url(),
   maxPages: PositiveInt.default(10),
+  outputRoot: z.string().default("output"),
+});
+
+export const ScribdCommandSchema = z.object({
+  command: z.literal("scribd"),
+  url: z.url(),
+  outputRoot: z.string().default("output"),
+});
+
+export const ScribdBrowserCommandSchema = z.object({
+  command: z.literal("scribd-browser"),
+  url: z.url(),
+  waitMs: PositiveInt.default(300_000),
+  format: ScribdFormat.default("pdf"),
   outputRoot: z.string().default("output"),
 });
 
@@ -44,6 +59,8 @@ export const SubtitleCommandSchema = z.object({
 
 export const CliCommandSchema = z.discriminatedUnion("command", [
   ExtractCommandSchema,
+  ScribdCommandSchema,
+  ScribdBrowserCommandSchema,
   ListCommandSchema,
   ServeCommandSchema,
   CookieImportCommandSchema,
@@ -52,6 +69,8 @@ export const CliCommandSchema = z.discriminatedUnion("command", [
 ]);
 
 export type ExtractCommand = z.infer<typeof ExtractCommandSchema>;
+export type ScribdCommand = z.infer<typeof ScribdCommandSchema>;
+export type ScribdBrowserCommand = z.infer<typeof ScribdBrowserCommandSchema>;
 export type ListCommand = z.infer<typeof ListCommandSchema>;
 export type ServeCommand = z.infer<typeof ServeCommandSchema>;
 export type CookieImportCommand = z.infer<typeof CookieImportCommandSchema>;

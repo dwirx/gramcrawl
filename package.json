@@ -17,6 +17,7 @@
     "fix": "bun run lint:fix && bun run fmt",
     "bench": "bash scripts/bench.sh",
     "extract": "bun run src/cli.ts extract",
+    "scribd": "bun run src/cli.ts scribd",
     "subtitle": "bun run src/cli.ts subtitle",
     "extract:list": "bun run src/cli.ts list",
     "extract:serve": "bun run src/cli.ts serve",
@@ -26,6 +27,7 @@
   },
   "dependencies": {
     "cheerio": "^1.2.0",
+    "docx": "^9.5.3",
     "elysia": "^1.4.25",
     "playwright": "^1.58.2",
     "zod": "^4.3.6"

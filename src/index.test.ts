@@ -95,6 +95,52 @@ describe("parseCliArgs", () => {
     expect(command.url).toBe("https://www.youtube.com/watch?v=7ZdPKEf-LXA");
     expect(command.lang).toBe("en");
   });
+
+  test("parses scribd command", () => {
+    const command = parseCliArgs([
+      "bun",
+      "src/cli.ts",
+      "scribd",
+      "https://id.scribd.com/document/730392424/test",
+      "--out",
+      "output-custom",
+    ]);
+
+    expect(command.command).toBe("scribd");
+    if (command.command !== "scribd") {
+      throw new Error("Expected scribd command");
+    }
+
+    expect(command.url).toBe("https://id.scribd.com/document/730392424/test");
+    expect(command.outputRoot).toBe("output-custom");
+  });
+
+  test("parses scribd-browser command", () => {
+    const command = parseCliArgs([
+      "bun",
+      "src/cli.ts",
+      "scribd-browser",
+      "https://www.scribd.com/document/697321839/sample",
+      "--out",
+      "downloads",
+      "--wait-ms",
+      "240000",
+      "--format",
+      "pdf",
+    ]);
+
+    expect(command.command).toBe("scribd-browser");
+    if (command.command !== "scribd-browser") {
+      throw new Error("Expected scribd-browser command");
+    }
+
+    expect(command.url).toBe(
+      "https://www.scribd.com/document/697321839/sample",
+    );
+    expect(command.outputRoot).toBe("downloads");
+    expect(command.waitMs).toBe(240000);
+    expect(command.format).toBe("pdf");
+  });
 });
 
 describe("normalizeLegacyArgs", () => {

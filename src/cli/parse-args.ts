@@ -5,6 +5,8 @@ import {
   CookieSetCommandSchema,
   ExtractCommandSchema,
   ListCommandSchema,
+  ScribdCommandSchema,
+  ScribdBrowserCommandSchema,
   ServeCommandSchema,
   SubtitleCommandSchema,
   type CliCommand,
@@ -39,6 +41,32 @@ export function parseCliArgs(argv: string[]): CliCommand {
       command,
       url,
       maxPages,
+      outputRoot,
+    });
+  }
+
+  if (command === "scribd") {
+    const url = args[1];
+    const outputRoot = getFlagValue(args, ["--out", "-o"]);
+
+    return ScribdCommandSchema.parse({
+      command,
+      url,
+      outputRoot,
+    });
+  }
+
+  if (command === "scribd-browser") {
+    const url = args[1];
+    const outputRoot = getFlagValue(args, ["--out", "-o"]);
+    const waitMs = getFlagValue(args, ["--wait-ms", "-w"]);
+    const format = getFlagValue(args, ["--format", "-f"]);
+
+    return ScribdBrowserCommandSchema.parse({
+      command,
+      url,
+      waitMs,
+      format,
       outputRoot,
     });
   }
@@ -105,7 +133,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
   }
 
   throw new Error(
-    `Command tidak dikenali: ${command}. Gunakan: extract | subtitle | list | serve | cookie-import | cookie-set`,
+    `Command tidak dikenali: ${command}. Gunakan: extract | scribd | scribd-browser | subtitle | list | serve | cookie-import | cookie-set`,
   );
 }
 

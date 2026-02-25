@@ -31,8 +31,37 @@ function isUrl(value: string): boolean {
   return UrlSchema.safeParse(value).success;
 }
 
+function isScribdUrl(value: string): boolean {
+  if (!isUrl(value)) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "scribd.com" || hostname.endsWith(".scribd.com");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCommandText(input: string): string {
+  const token = input.trim().split(/\s+/)[0] ?? "";
+  if (!token.startsWith("/")) {
+    return input.trim();
+  }
+
+  const atIndex = token.indexOf("@");
+  if (atIndex === -1) {
+    return input.trim();
+  }
+
+  const normalizedToken = token.slice(0, atIndex);
+  const rest = input.trim().slice(token.length).trim();
+  return rest ? `${normalizedToken} ${rest}` : normalizedToken;
+}
+
 export function parseTelegramCommand(text: string): TelegramCommand {
-  const trimmed = text.trim();
+  const trimmed = normalizeCommandText(text);
 
   if (
     !trimmed ||
@@ -63,6 +92,21 @@ export function parseTelegramCommand(text: string): TelegramCommand {
       kind: "extract",
       url,
       maxPages: toInt(parts[2], 1),
+    };
+  }
+
+  if (trimmed.startsWith("/scribd")) {
+    const parts = trimmed.split(/\s+/);
+    const url = parts[1];
+
+    if (!url || !isScribdUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "extract",
+      url,
+      maxPages: 1,
     };
   }
 

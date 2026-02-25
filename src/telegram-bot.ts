@@ -1,5 +1,6 @@
 import { startTelegramBot } from "./telegram/bot";
 import { createLogger } from "./telegram/logger";
+import { setupRuntimeBinaries } from "./runtime/binaries";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const outputRoot = process.env.EXTRACT_OUTPUT_ROOT ?? "output";
@@ -14,6 +15,7 @@ await logger.info("starting telegram bot process", { outputRoot, envPath });
 await logger.info("shutdown hint", { usage: "Ctrl+C to stop bot" });
 
 try {
+  await setupRuntimeBinaries();
   await startTelegramBot({ token, outputRoot, envPath });
 } catch (error) {
   await logger.error("bot process terminated with error", error);

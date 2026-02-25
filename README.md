@@ -63,6 +63,10 @@ Tool ini sekarang punya mode CLI modular dan history run.
   ```bash
   bun run extract -- https://example.com/article --max-pages 1
   ```
+- **Extract cepat Scribd (1 halaman)**
+  ```bash
+  bun run scribd -- https://id.scribd.com/document/730392424/contoh
+  ```
 - **Lihat history extract**
   ```bash
   bun run extract:list -- --limit 10
@@ -72,12 +76,19 @@ Tool ini sekarang punya mode CLI modular dan history run.
   bun run extract:serve -- --port 3000
   ```
 - **Jalankan Telegram bot**
+
   ```bash
   TELEGRAM_BOT_TOKEN=xxx bun run bot:telegram
   ```
-- **Import cookie browser (format Netscape cookies.txt) ke .env**
+
+  - Saat startup, bot akan auto-setup binary runtime:
+    - `yt-dlp` (download otomatis ke `.cache/bin` jika belum ada)
+    - Playwright Chromium (install otomatis jika belum ada)
+
+- **Import cookie browser (Netscape cookies.txt atau browser cookies.json) ke .env**
   ```bash
-  bun run src/cli.ts cookie-import projectmultatuli.org /path/to/cookies.txt
+  bun run src/cli.ts cookie-import scribd.com /path/to/cookies.txt
+  bun run src/cli.ts cookie-import scribd.com /path/to/cookies.json
   ```
 - **Set cookie manual ke .env**
   ```bash
@@ -122,7 +133,9 @@ Variabel env tambahan untuk website anti-bot:
     `EXTRACT_COOKIE_MAP="{\"projectmultatuli.org\":\"cf_clearance=...; __cf_bm=...\"}"`
 - `EXTRACT_BROWSER_FALLBACK=1` untuk aktifkan fallback browser session (Playwright)
 - `EXTRACT_BROWSER_HEADLESS=0` untuk mode non-headless (agar bisa verifikasi manual)
+- `EXTRACT_BROWSER_FORCE=1` untuk paksa pakai browser fallback dari awal (browser pasti dibuka saat extract)
 - `EXTRACT_BROWSER_WAIT_MS=120000` untuk lama tunggu challenge/verification
+- `EXTRACT_YT_DLP_AUTO_UPDATE=1` untuk auto-update `yt-dlp` lokal setiap ~24 jam (set `0` untuk nonaktif)
 
 Jika memakai browser fallback, install browser binary dulu:
 

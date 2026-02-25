@@ -2,6 +2,8 @@ import { runCli } from "./cli";
 
 const KNOWN_COMMANDS = new Set([
   "extract",
+  "scribd",
+  "scribd-browser",
   "subtitle",
   "list",
   "serve",

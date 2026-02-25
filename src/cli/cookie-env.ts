@@ -35,6 +35,49 @@ function parseCookieMap(rawValue: string | undefined): CookieMap {
   }
 }
 
+function mergeCookieHeaders(headers: string[]): string {
+  const merged = new Map<string, string>();
+  for (const header of headers) {
+    for (const part of header.split(";")) {
+      const trimmed = part.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const [name, ...valueParts] = trimmed.split("=");
+      const key = (name ?? "").trim();
+      if (!key) {
+        continue;
+      }
+
+      merged.set(key, valueParts.join("=").trim());
+    }
+  }
+
+  return Array.from(merged.entries())
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+function resolveCookieHeaderFromMap(
+  cookieMap: CookieMap,
+  rawDomain: string,
+): string {
+  const domain = normalizeDomain(rawDomain);
+  const matchedEntries = Object.entries(cookieMap)
+    .filter(
+      ([cookieDomain]) =>
+        cookieDomain === domain || domain.endsWith(`.${cookieDomain}`),
+    )
+    .sort((a, b) => a[0].length - b[0].length);
+
+  if (matchedEntries.length === 0) {
+    return "";
+  }
+
+  return mergeCookieHeaders(matchedEntries.map(([, header]) => header));
+}
+
 function readEnvLines(content: string): string[] {
   if (!content.trim()) {
     return [];
@@ -129,6 +172,40 @@ function parseNetscapeCookieLine(line: string): {
   };
 }
 
+type BrowserCookieEntry = {
+  domain: string;
+  name: string;
+  value: string;
+  expiresAt: number;
+};
+
+function parseBrowserCookieEntry(input: unknown): BrowserCookieEntry | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return null;
+  }
+
+  const raw = input as Record<string, unknown>;
+  const domainValue =
+    (typeof raw.domain === "string" ? raw.domain : "") ||
+    (typeof raw.host === "string" ? raw.host : "");
+  const name = (typeof raw.name === "string" ? raw.name : "").trim();
+  const value = (typeof raw.value === "string" ? raw.value : "").trim();
+  const expiresRaw =
+    (typeof raw.expirationDate === "number" ? raw.expirationDate : null) ??
+    (typeof raw.expires === "number" ? raw.expires : null) ??
+    (typeof raw.expiresDate === "number" ? raw.expiresDate : null) ??
+    0;
+  const expiresAt =
+    Number.isFinite(expiresRaw) && expiresRaw > 0 ? Math.floor(expiresRaw) : 0;
+  const domain = normalizeDomain(domainValue);
+
+  if (!domain || !name) {
+    return null;
+  }
+
+  return { domain, name, value, expiresAt };
+}
+
 export function extractCookieMapFromNetscape(fileText: string): CookieMap {
   const nowEpoch = Math.floor(Date.now() / 1000);
   const perDomain = new Map<string, Map<string, string>>();
@@ -169,23 +246,80 @@ export function extractCookieMapFromNetscape(fileText: string): CookieMap {
   );
 }
 
+export function extractCookieMapFromBrowserJson(fileText: string): CookieMap {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fileText) as unknown;
+  } catch {
+    return {};
+  }
+
+  const items = Array.isArray(parsed)
+    ? parsed
+    : parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as Record<string, unknown>).cookies)
+      ? ((parsed as Record<string, unknown>).cookies as unknown[])
+      : [];
+
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const perDomain = new Map<string, Map<string, string>>();
+
+  for (const item of items) {
+    const parsedCookie = parseBrowserCookieEntry(item);
+    if (!parsedCookie) {
+      continue;
+    }
+
+    const isExpired =
+      parsedCookie.expiresAt > 0 && parsedCookie.expiresAt < nowEpoch;
+    if (isExpired) {
+      continue;
+    }
+
+    const current =
+      perDomain.get(parsedCookie.domain) ?? new Map<string, string>();
+    current.set(parsedCookie.name, parsedCookie.value);
+    perDomain.set(parsedCookie.domain, current);
+  }
+
+  return Object.fromEntries(
+    Array.from(perDomain.entries()).map(([domain, cookies]) => {
+      const header = Array.from(cookies.entries())
+        .map(([name, value]) => `${name}=${value}`)
+        .join("; ");
+
+      return [domain, header];
+    }),
+  );
+}
+
 export function extractCookieHeaderFromNetscape(
   fileText: string,
   rawDomain: string,
 ): string {
-  const domain = normalizeDomain(rawDomain);
   const cookieMap = extractCookieMapFromNetscape(fileText);
-  const exact = cookieMap[domain] ?? "";
+  return resolveCookieHeaderFromMap(cookieMap, rawDomain);
+}
 
-  if (exact) {
-    return exact;
+export function extractCookieHeaderFromBrowserJson(
+  fileText: string,
+  rawDomain: string,
+): string {
+  const cookieMap = extractCookieMapFromBrowserJson(fileText);
+  return resolveCookieHeaderFromMap(cookieMap, rawDomain);
+}
+
+export function extractCookieHeaderFromAnyFormat(
+  fileText: string,
+  rawDomain: string,
+): string {
+  const fromNetscape = extractCookieHeaderFromNetscape(fileText, rawDomain);
+  if (fromNetscape) {
+    return fromNetscape;
   }
 
-  const fallback = Object.entries(cookieMap).find(([cookieDomain]) =>
-    domain.endsWith(`.${cookieDomain}`),
-  )?.[1];
-
-  return fallback ?? "";
+  return extractCookieHeaderFromBrowserJson(fileText, rawDomain);
 }
 
 export async function writeCookieToEnv(

@@ -2,6 +2,10 @@ function shouldEnableBrowserFallback(): boolean {
   return process.env.EXTRACT_BROWSER_FALLBACK === "1";
 }
 
+export function isBrowserFallbackForced(): boolean {
+  return process.env.EXTRACT_BROWSER_FORCE === "1";
+}
+
 function isHeadless(): boolean {
   return process.env.EXTRACT_BROWSER_HEADLESS !== "0";
 }

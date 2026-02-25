@@ -1,4 +1,7 @@
-import { fetchBrowserFallbackHtml } from "./browser-fallback";
+import {
+  fetchBrowserFallbackHtml,
+  isBrowserFallbackForced,
+} from "./browser-fallback";
 import { loadCheerioModule } from "./cheerio-loader";
 import { collectImagesFromBlocks } from "./image-utils";
 import { extractPageFromHtml } from "./page-extractor";
@@ -214,8 +217,26 @@ export async function crawlCheerioDocs(
     try {
       const html = await fetchHtml(currentUrl);
       let extracted: ExtractedPage | null = null;
+      const forceBrowser = isBrowserFallbackForced();
 
-      if (html) {
+      if (forceBrowser) {
+        const browserHtml = await fetchBrowserFallbackHtml(currentUrl);
+
+        if (browserHtml) {
+          const browserExtracted = extractPageFromHtml(
+            currentUrl,
+            browserHtml,
+            scopedRootUrl,
+            cheerio.load,
+          );
+
+          if (browserExtracted.articleBodyText.length > 80) {
+            extracted = browserExtracted;
+          }
+        }
+      }
+
+      if (!extracted && html) {
         extracted = extractPageFromHtml(
           currentUrl,
           html,
