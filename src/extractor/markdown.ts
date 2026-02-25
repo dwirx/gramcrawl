@@ -26,6 +26,13 @@ const UI_NOISE_TEXTS = new Set([
   "search search",
   "jadi kawan m",
   "proyeksengsaranasional",
+  "topics",
+  "sections",
+  "more",
+  "for ieee members",
+  "ieee spectrum",
+  "follow ieee spectrum",
+  "support ieee spectrum",
 ]);
 
 const STOP_MARKERS = [
@@ -35,6 +42,7 @@ const STOP_MARKERS = [
   "temukan kumpulan riset terkait",
   "see all",
   "berikut sebaran masalahnya",
+  "related stories",
 ];
 
 const IMAGE_NOISE_SRC_MARKERS = [
@@ -349,8 +357,28 @@ function isUiNoiseLine(text: string): boolean {
   if (
     lowered.includes("create a chart") ||
     lowered.includes("create a hierarchy graph") ||
-    lowered.includes("create a pictogram chart")
+    lowered.includes("create a pictogram chart") ||
+    lowered.includes("create an account") ||
+    lowered.includes("exclusive for ieee members") ||
+    lowered.includes("learn more about ieee") ||
+    lowered.includes("ieee spectrum account") ||
+    lowered.includes("enjoy more free content and benefits") ||
+    lowered.includes("saving articles to read later requires") ||
+    lowered.includes("the institute content is only available for members") ||
+    lowered.includes("adding your response to an article requires") ||
+    lowered.includes("access thousands of articles completely free") ||
+    lowered.includes("access thousands of articles")
   ) {
+    return true;
+  }
+
+  const raw = text.trim();
+
+  if (/^\[[^\]]+\]\(https?:\/\/[^)]+\)$/i.test(raw)) {
+    return true;
+  }
+
+  if (/^-\s+\[[^\]]+›\]\(https?:\/\/[^)]+\)$/i.test(raw)) {
     return true;
   }
 
@@ -373,6 +401,10 @@ function shouldSkipImageInOutput(
   }
 
   if (src.endsWith(".svg")) {
+    return true;
+  }
+
+  if (src.startsWith("data:image/")) {
     return true;
   }
 

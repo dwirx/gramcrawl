@@ -51,6 +51,13 @@ const NOISE_TEXTS = new Set([
   "youtube",
   "whatsapp",
   "x",
+  "topics",
+  "sections",
+  "more",
+  "for ieee members",
+  "ieee spectrum",
+  "follow ieee spectrum",
+  "support ieee spectrum",
 ]);
 
 function normalizeWhitespace(value: string): string {
@@ -75,6 +82,7 @@ function shouldSkipImage(src: string): boolean {
   const lowered = src.toLowerCase();
 
   return (
+    lowered.startsWith("data:image/") ||
     lowered.endsWith(".svg") ||
     lowered.includes("/uikit-assets/assets/icons/") ||
     lowered.includes("/uikit-assets/assets/logos/") ||
