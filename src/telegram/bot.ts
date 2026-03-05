@@ -26,6 +26,13 @@ import {
 import { extractWithMarkdownNew } from "../mark/service";
 import { parseTelegramCommand } from "./command-parser";
 import { createLogger } from "./logger";
+import {
+  isTimeoutLikeError,
+  pollingTimeoutBackoffMs,
+  runWithChatActionHeartbeat,
+  shouldLogPollingTimeout,
+  type TelegramChatActionLike,
+} from "./runtime-utils";
 
 type TelegramApiResponse<T> = {
   ok: boolean;
@@ -67,7 +74,7 @@ type TelegramFile = {
   file_size?: number;
 };
 
-type TelegramChatAction = "typing" | "upload_document";
+type TelegramChatAction = TelegramChatActionLike;
 type TelegramInlineKeyboardMarkup = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
 };
@@ -76,7 +83,8 @@ type TelegramBotCommand = {
   command: string;
   description: string;
 };
-const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
+const TELEGRAM_REQUEST_TIMEOUT_MS = 35_000;
 const TELEGRAM_MAX_RETRIES = 3;
 const SUBTITLE_SESSION_TTL_MS = 15 * 60 * 1_000;
 const SUBTITLE_MAX_ACTIVE_SESSIONS = 500;
@@ -218,13 +226,15 @@ class TelegramApi {
       }
     }
 
-    throw new Error(lastError?.message ?? `Telegram ${method} failed`);
+    throw new Error(
+      `Telegram ${method} failed after ${TELEGRAM_MAX_RETRIES} attempts: ${lastError?.message ?? "unknown error"}`,
+    );
   }
 
   async getUpdates(offset?: number): Promise<TelegramUpdate[]> {
     return this.requestJson<TelegramUpdate[]>("getUpdates", {
       offset,
-      timeout: 30,
+      timeout: TELEGRAM_POLL_TIMEOUT_SECONDS,
       limit: 20,
       allowed_updates: ["message", "callback_query"],
     });
@@ -1489,9 +1499,15 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           label: nextJob.label,
           queued: state.queue.length,
         });
-        await nextJob.run({
-          isCancelled: () => cancelRef.cancelled,
-        });
+        await runWithChatActionHeartbeat(
+          (targetChatId, action) => api.sendChatAction(targetChatId, action),
+          chatId,
+          "typing",
+          async () =>
+            nextJob.run({
+              isCancelled: () => cancelRef.cancelled,
+            }),
+        );
       } catch (error) {
         await logger.error("chat job failed", error, {
           chatId,
@@ -1636,10 +1652,19 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
     });
   }
 
+  let consecutivePollingTimeouts = 0;
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       const updates = await api.getUpdates(offset);
+      if (consecutivePollingTimeouts > 0) {
+        await logger.info("polling recovered", {
+          previousTimeouts: consecutivePollingTimeouts,
+        });
+        consecutivePollingTimeouts = 0;
+      }
+
       if (updates.length > 0) {
         await logger.debug("updates fetched", { count: updates.length });
       }
@@ -3087,6 +3112,20 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
         }
       }
     } catch (error) {
+      if (isTimeoutLikeError(error)) {
+        consecutivePollingTimeouts += 1;
+        const backoffMs = pollingTimeoutBackoffMs(consecutivePollingTimeouts);
+        if (shouldLogPollingTimeout(consecutivePollingTimeouts)) {
+          await logger.warn("polling timeout", {
+            consecutiveTimeouts: consecutivePollingTimeouts,
+            backoffMs,
+          });
+        }
+        await Bun.sleep(backoffMs);
+        continue;
+      }
+
+      consecutivePollingTimeouts = 0;
       await logger.error("polling loop error", error);
       await Bun.sleep(2000);
     }
