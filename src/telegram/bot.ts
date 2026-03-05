@@ -17,6 +17,7 @@ import {
   downloadSubtitlesAndConvert,
   getYtDlpStatus,
   listAvailableSubtitles,
+  pickBestSubtitleLanguage,
   pickPreferredSubtitleLanguages,
   resolveOriginalLanguage,
   type SubtitleLanguage,
@@ -98,6 +99,7 @@ type PendingSubtitleSelection = {
   url: string;
   title: string;
   languages: Set<string>;
+  bestLanguage: string | null;
   createdAt: number;
 };
 
@@ -478,7 +480,7 @@ function buildHelpMessage(): string {
     "  Shortcut extract 1 halaman khusus Scribd.",
     "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
     "• /subtitle <url>",
-    "  Ambil subtitle YouTube (pilih bahasa lewat tombol).",
+    "  Ambil subtitle YouTube (tombol ⚡ Auto Terbaik + pilih bahasa).",
     "• /mark <url>",
     "  Convert URL ke Markdown via markdown.new.",
     "• /md <url>",
@@ -710,7 +712,7 @@ function buildMenuActionMessage(action: MainMenuAction): string {
       "• /subtitle <url-youtube>",
       "• Contoh: /subtitle https://www.youtube.com/watch?v=dQw4w9WgXcQ",
       "",
-      "Bot akan menampilkan tombol pilihan bahasa subtitle.",
+      "Bot akan menampilkan tombol ⚡ Auto Terbaik + pilihan bahasa subtitle.",
     ].join("\n");
   }
 
@@ -753,9 +755,19 @@ function subtitleButtonLabel(language: SubtitleLanguage): string {
 function buildSubtitleKeyboard(
   sessionId: string,
   languages: SubtitleLanguage[],
+  bestLanguage: string | null,
 ): TelegramInlineKeyboardMarkup {
   const rows: TelegramInlineKeyboardMarkup["inline_keyboard"] = [];
   let currentRow: Array<{ text: string; callback_data: string }> = [];
+
+  if (bestLanguage) {
+    rows.push([
+      {
+        text: `⚡ Auto Terbaik (${bestLanguage})`,
+        callback_data: `subtitle:${sessionId}:__auto__`,
+      },
+    ]);
+  }
 
   for (const language of languages) {
     currentRow.push({
@@ -1705,7 +1717,24 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             }
 
             if (!session.languages.has(callbackData.language)) {
-              await api.answerCallbackQuery(callback.id, "Bahasa tidak valid.");
+              if (callbackData.language !== "__auto__") {
+                await api.answerCallbackQuery(
+                  callback.id,
+                  "Bahasa tidak valid.",
+                );
+                continue;
+              }
+            }
+
+            const selectedLanguage =
+              callbackData.language === "__auto__"
+                ? session.bestLanguage
+                : callbackData.language;
+            if (!selectedLanguage || !session.languages.has(selectedLanguage)) {
+              await api.answerCallbackQuery(
+                callback.id,
+                "Auto subtitle tidak tersedia. Jalankan /subtitle lagi.",
+              );
               continue;
             }
 
@@ -1722,11 +1751,12 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             subtitleSessions.delete(callbackData.sessionId);
             const queuedSubtitleJob = enqueueChatJob(
               callbackChatId,
-              `subtitle:${callbackData.language}`,
+              `subtitle:${selectedLanguage}`,
               async (cancelToken) => {
                 await logger.info("subtitle callback selected", {
                   chatId: callbackChatId,
-                  language: callbackData.language,
+                  requestedLanguage: callbackData.language,
+                  language: selectedLanguage,
                   title: session.title,
                 });
 
@@ -1742,7 +1772,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   callbackChatId,
                   buildStatusCard("⏳ [1/4] Menyiapkan subtitle", [
                     { label: "URL", value: session.url },
-                    { label: "Bahasa", value: callbackData.language },
+                    { label: "Bahasa", value: selectedLanguage },
                   ]),
                 );
 
@@ -1752,13 +1782,13 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     statusMessageId,
                     buildStatusCard("⏳ [2/4] Mengunduh subtitle", [
                       { label: "Judul", value: session.title },
-                      { label: "Bahasa", value: callbackData.language },
+                      { label: "Bahasa", value: selectedLanguage },
                     ]),
                   );
 
                   const subtitleResult = await downloadSubtitlesAndConvert(
                     session.url,
-                    callbackData.language,
+                    selectedLanguage,
                     config.outputRoot,
                     { includeTimestamp: isSubtitleTimestampEnabled() },
                   );
@@ -1832,7 +1862,8 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   );
                   await logger.error("subtitle callback failed", error, {
                     chatId: callbackChatId,
-                    language: callbackData.language,
+                    requestedLanguage: callbackData.language,
+                    language: selectedLanguage,
                     url: session.url,
                   });
                 }
@@ -1851,7 +1882,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             if (queuedSubtitleJob.started) {
               await api.answerCallbackQuery(
                 callback.id,
-                `Memproses subtitle ${callbackData.language}...`,
+                `Memproses subtitle ${selectedLanguage}...`,
               );
             } else {
               await api.answerCallbackQuery(
@@ -2177,6 +2208,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     listed.languages,
                     resolvedOriginal,
                   );
+                  const bestLanguage = pickBestSubtitleLanguage(
+                    listed.languages,
+                    resolvedOriginal,
+                  );
 
                   if (preferred.length === 0) {
                     await api.editMessage(
@@ -2195,12 +2230,22 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     chatId,
                     url: command.url,
                     title: listed.title,
-                    languages: new Set(preferred.map((item) => item.code)),
+                    languages: new Set(
+                      [
+                        ...preferred.map((item) => item.code),
+                        bestLanguage?.code ?? "",
+                      ].filter(Boolean),
+                    ),
+                    bestLanguage: bestLanguage?.code ?? null,
                     createdAt: Date.now(),
                   });
                   cleanupSubtitleSessions(subtitleSessions);
 
-                  const keyboard = buildSubtitleKeyboard(sessionId, preferred);
+                  const keyboard = buildSubtitleKeyboard(
+                    sessionId,
+                    preferred,
+                    bestLanguage?.code ?? null,
+                  );
                   await api.editMessage(
                     chatId,
                     statusMessageId,
@@ -2215,6 +2260,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                         {
                           label: "Bahasa ditampilkan",
                           value: preferred.length,
+                        },
+                        {
+                          label: "Auto terbaik",
+                          value: bestLanguage?.code ?? "-",
                         },
                         {
                           label: "Timestamp saat ini",
@@ -2243,6 +2292,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     title: listed.title,
                     url: listed.webpageUrl,
                     languages: listed.languages.length,
+                    bestLanguage: bestLanguage?.code ?? null,
                   });
                 } catch (error) {
                   const detail =

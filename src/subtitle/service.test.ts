@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   parseSrtToTimestampText,
+  pickBestSubtitleLanguage,
   pickPreferredSubtitleLanguages,
   parseVttToTimestampText,
   resolveOriginalLanguage,
@@ -91,5 +92,19 @@ describe("subtitle timestamp parser", () => {
     );
 
     expect(resolved).toBe("fr");
+  });
+
+  test("picks best subtitle language with manual priority", () => {
+    const best = pickBestSubtitleLanguage(
+      [
+        { code: "id", hasManual: false, hasAuto: true },
+        { code: "en", hasManual: true, hasAuto: true },
+        { code: "es", hasManual: true, hasAuto: false },
+      ],
+      "es-MX",
+    );
+
+    expect(best?.code).toBe("es");
+    expect(best?.hasManual).toBeTrue();
   });
 });

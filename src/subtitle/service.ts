@@ -782,6 +782,19 @@ export function pickPreferredSubtitleLanguages(
   return available.slice(0, 3);
 }
 
+export function pickBestSubtitleLanguage(
+  available: SubtitleLanguage[],
+  originalLanguage: string | null,
+): SubtitleLanguage | null {
+  if (available.length === 0) {
+    return null;
+  }
+
+  const sorted = sortSubtitleLanguages(available);
+  const preferred = pickPreferredSubtitleLanguages(sorted, originalLanguage);
+  return preferred[0] ?? sorted[0] ?? null;
+}
+
 export function resolveOriginalLanguage(
   available: SubtitleLanguage[],
   originalLanguage: string | null,
