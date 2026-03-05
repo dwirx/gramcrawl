@@ -1,7 +1,12 @@
+import { readdir, rm } from "node:fs/promises";
 import { z } from "zod";
 import type { Page } from "playwright";
 import { runExtraction } from "../app/extract-service";
-import { readManifest } from "../app/run-store";
+import {
+  buildSiteFolderName,
+  readManifest,
+  writeManifest,
+} from "../app/run-store";
 import {
   extractCookieHeaderFromNetscape,
   extractCookieMapFromNetscape,
@@ -30,7 +35,9 @@ type TelegramApiResponse<T> = {
 type TelegramUpdate = {
   update_id: number;
   message?: {
+    message_id: number;
     chat: { id: number };
+    from?: { id: number };
     text?: string;
     caption?: string;
     document?: {
@@ -41,6 +48,7 @@ type TelegramUpdate = {
   };
   callback_query?: {
     id: string;
+    from?: { id: number };
     data?: string;
     message?: {
       message_id: number;
@@ -71,6 +79,12 @@ const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_MAX_RETRIES = 3;
 const SUBTITLE_SESSION_TTL_MS = 15 * 60 * 1_000;
 const SUBTITLE_MAX_ACTIVE_SESSIONS = 500;
+const EXTRACT_CACHE_DEFAULT_TTL_MS = 6 * 60 * 60 * 1_000;
+const EXTRACT_CACHE_DEFAULT_MAX_ENTRIES = 200;
+const BOT_RATE_LIMIT_DEFAULT_WINDOW_MS = 60 * 1_000;
+const BOT_RATE_LIMIT_DEFAULT_MAX_REQUESTS = 8;
+const CHAT_QUEUE_MAX_LENGTH = 20;
+const CLEAN_CHAT_SCAN_MULTIPLIER = 4;
 
 const BotConfigSchema = z.object({
   token: z.string().min(10),
@@ -85,6 +99,40 @@ type PendingSubtitleSelection = {
   title: string;
   languages: Set<string>;
   createdAt: number;
+};
+
+type JobCancelToken = {
+  isCancelled: () => boolean;
+};
+
+type ChatJob = {
+  id: string;
+  label: string;
+  createdAt: number;
+  run: (token: JobCancelToken) => Promise<void>;
+};
+
+type ChatQueueState = {
+  running: ChatJob | null;
+  runningCancelRef: { cancelled: boolean } | null;
+  queue: ChatJob[];
+  startedAt: number;
+};
+
+type ExtractCacheEntry = {
+  key: string;
+  rootUrl: string;
+  maxPages: number;
+  createdAt: number;
+  expiresAt: number;
+  extraction: {
+    runId: string;
+    site: string;
+    resultFile: string;
+    markdownFiles: string[];
+    textFiles: string[];
+    crawledPages: number;
+  };
 };
 const LANGUAGE_COUNTRY_MAP: Record<string, string> = {
   ar: "SA",
@@ -215,6 +263,17 @@ class TelegramApi {
     }
   }
 
+  async deleteMessage(chatId: number, messageId: number): Promise<boolean> {
+    try {
+      return await this.requestJson<boolean>("deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+      });
+    } catch {
+      return false;
+    }
+  }
+
   async sendDocument(
     chatId: number,
     path: string,
@@ -287,6 +346,127 @@ class TelegramApi {
   }
 }
 
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function buildExtractCacheKey(url: string, maxPages: number): string {
+  try {
+    const normalized = new URL(url).toString();
+    return `${normalized}::${maxPages}`;
+  } catch {
+    return `${url.trim()}::${maxPages}`;
+  }
+}
+
+function cleanupExtractCache(
+  cache: Map<string, ExtractCacheEntry>,
+  maxEntries: number,
+): void {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) {
+      cache.delete(key);
+    }
+  }
+
+  const overflow = cache.size - maxEntries;
+  if (overflow <= 0) {
+    return;
+  }
+
+  const oldest = [...cache.entries()]
+    .sort((a, b) => a[1].createdAt - b[1].createdAt)
+    .slice(0, overflow);
+  for (const [key] of oldest) {
+    cache.delete(key);
+  }
+}
+
+function parseSiteScope(siteInput: string | undefined): string {
+  const raw = siteInput?.trim().toLowerCase() ?? "";
+  if (!raw) {
+    return "";
+  }
+
+  if (raw.includes("://")) {
+    return buildSiteFolderName(raw);
+  }
+
+  if (/^[a-z0-9.-]+$/u.test(raw)) {
+    return raw;
+  }
+
+  return buildSiteFolderName(`https://${raw}`);
+}
+
+async function removeDirectoriesByName(
+  rootDir: string,
+  targetName: string,
+): Promise<number> {
+  let removed = 0;
+  const stack = [rootDir];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+
+    let entries: Array<{ isDirectory: () => boolean; name: string }>;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const fullPath = `${current}/${entry.name}`;
+      if (entry.name === targetName) {
+        await rm(fullPath, { recursive: true, force: true });
+        removed += 1;
+        continue;
+      }
+
+      stack.push(fullPath);
+    }
+  }
+
+  return removed;
+}
+
+function isCommandRateLimited(
+  command: ReturnType<typeof parseTelegramCommand>,
+): boolean {
+  if (
+    command.kind === "help" ||
+    command.kind === "cancel" ||
+    command.kind === "stats" ||
+    command.kind === "clearCache" ||
+    command.kind === "cleanOutput" ||
+    command.kind === "cleanDownloads" ||
+    command.kind === "clearChat"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function buildHelpMessage(): string {
   return [
     "TeleExtract Bot - Bantuan",
@@ -307,11 +487,23 @@ function buildHelpMessage(): string {
     "  Lihat riwayat extract terbaru (limit 1-20).",
     "• /ytdlp <status|version|update>",
     "  Cek versi yt-dlp atau update manual lewat bot.",
+    "• /cancel",
+    "  Batalkan job aktif (best effort) dan hapus antrian chat ini.",
+    "• /stats",
+    "  Lihat status bot: queue, cache, memory, rate-limit.",
     "",
     "Pengaturan:",
     "• /subtitletimestamp <on|off|status>",
     "• /timestamp <on|off|status> (alias cepat)",
     "• /browser <on|off|status>",
+    "• /clearcache",
+    "  Bersihkan cache runtime (extract cache, sesi subtitle, limiter).",
+    "• /cleanoutput <all|site>",
+    "  Hapus folder output penuh atau per-site.",
+    "• /cleandownloads <all|site>",
+    "  Bersihkan folder subtitle/download hasil.",
+    "• /clearchat [limit]",
+    "  Hapus message di chat (best effort, default 20).",
     "",
     "Cookie:",
     "• Upload cookies.txt tanpa command",
@@ -369,6 +561,30 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "cookieset",
       description: "Set cookie header manual per domain",
+    },
+    {
+      command: "cancel",
+      description: "Batalkan job aktif dan antrian chat ini",
+    },
+    {
+      command: "stats",
+      description: "Status bot: queue, cache, memory, limiter",
+    },
+    {
+      command: "clearcache",
+      description: "Bersihkan cache runtime bot",
+    },
+    {
+      command: "cleanoutput",
+      description: "Hapus output: /cleanoutput <all|site>",
+    },
+    {
+      command: "cleandownloads",
+      description: "Bersihkan hasil download subtitle",
+    },
+    {
+      command: "clearchat",
+      description: "Hapus message chat: /clearchat [limit]",
     },
   ];
 }
@@ -443,6 +659,13 @@ function buildUnknownCommandMessage(input: string): string {
     "• /runs 5",
     "• /ytdlp status",
     "• /ytdlp update",
+    "• /cancel",
+    "• /stats",
+    "• /clearcache",
+    "• /cleanoutput all",
+    "• /cleanoutput example.com",
+    "• /cleandownloads all",
+    "• /clearchat 30",
     "",
     "Ketik /help atau /menu untuk daftar perintah lengkap.",
   ].join("\n");
@@ -1166,8 +1389,227 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
   const api = new TelegramApi(config.token);
   const logger = createLogger("telegram-bot");
   const subtitleSessions = new Map<string, PendingSubtitleSelection>();
+  const extractCache = new Map<string, ExtractCacheEntry>();
+  const userRateLimitBuckets = new Map<number, number[]>();
+  const chatQueues = new Map<number, ChatQueueState>();
+  const botStartedAt = Date.now();
+  const extractCacheTtlMs = readPositiveIntEnv(
+    "EXTRACT_BOT_CACHE_TTL_MS",
+    EXTRACT_CACHE_DEFAULT_TTL_MS,
+  );
+  const extractCacheMaxEntries = readPositiveIntEnv(
+    "EXTRACT_BOT_CACHE_MAX_ENTRIES",
+    EXTRACT_CACHE_DEFAULT_MAX_ENTRIES,
+  );
+  const rateLimitWindowMs = readPositiveIntEnv(
+    "EXTRACT_BOT_RATE_LIMIT_WINDOW_MS",
+    BOT_RATE_LIMIT_DEFAULT_WINDOW_MS,
+  );
+  const rateLimitMaxRequests = readPositiveIntEnv(
+    "EXTRACT_BOT_RATE_LIMIT_MAX_REQUESTS",
+    BOT_RATE_LIMIT_DEFAULT_MAX_REQUESTS,
+  );
   let offset: number | undefined;
   const tokenHint = `${config.token.slice(0, 6)}...${config.token.slice(-4)}`;
+
+  const consumeRateLimit = (
+    userId: number,
+  ): { allowed: boolean; retryAfterSec: number } => {
+    const now = Date.now();
+    const existing = userRateLimitBuckets.get(userId) ?? [];
+    const active = existing.filter(
+      (timestamp) => now - timestamp < rateLimitWindowMs,
+    );
+
+    if (active.length >= rateLimitMaxRequests) {
+      const retryAfterMs = Math.max(
+        0,
+        (active[0] ?? now) + rateLimitWindowMs - now,
+      );
+      userRateLimitBuckets.set(userId, active);
+      return {
+        allowed: false,
+        retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+      };
+    }
+
+    active.push(now);
+    userRateLimitBuckets.set(userId, active);
+    return { allowed: true, retryAfterSec: 0 };
+  };
+
+  const getOrCreateQueueState = (chatId: number): ChatQueueState => {
+    const existing = chatQueues.get(chatId);
+    if (existing) {
+      return existing;
+    }
+
+    const created: ChatQueueState = {
+      running: null,
+      runningCancelRef: null,
+      queue: [],
+      startedAt: 0,
+    };
+    chatQueues.set(chatId, created);
+    return created;
+  };
+
+  const runNextChatJob = (chatId: number): void => {
+    const state = getOrCreateQueueState(chatId);
+    if (state.running || state.queue.length === 0) {
+      return;
+    }
+
+    const nextJob = state.queue.shift();
+    if (!nextJob) {
+      return;
+    }
+
+    const cancelRef = { cancelled: false };
+    state.running = nextJob;
+    state.runningCancelRef = cancelRef;
+    state.startedAt = Date.now();
+
+    void (async () => {
+      try {
+        await logger.info("chat job started", {
+          chatId,
+          label: nextJob.label,
+          queued: state.queue.length,
+        });
+        await nextJob.run({
+          isCancelled: () => cancelRef.cancelled,
+        });
+      } catch (error) {
+        await logger.error("chat job failed", error, {
+          chatId,
+          label: nextJob.label,
+        });
+        await api.sendMessage(
+          chatId,
+          buildStatusCard("❌ Job gagal", [
+            { label: "Task", value: nextJob.label },
+            {
+              label: "Detail",
+              value: (error instanceof Error
+                ? error.message
+                : String(error)
+              ).slice(0, 300),
+            },
+          ]),
+        );
+      } finally {
+        state.running = null;
+        state.runningCancelRef = null;
+        state.startedAt = 0;
+        if (state.queue.length === 0) {
+          chatQueues.delete(chatId);
+        } else {
+          runNextChatJob(chatId);
+        }
+      }
+    })();
+  };
+
+  const enqueueChatJob = (
+    chatId: number,
+    label: string,
+    run: ChatJob["run"],
+  ): { started: boolean; position: number; queueSize: number } => {
+    const state = getOrCreateQueueState(chatId);
+    if (state.queue.length >= CHAT_QUEUE_MAX_LENGTH) {
+      return {
+        started: false,
+        position: -1,
+        queueSize: state.queue.length + (state.running ? 1 : 0),
+      };
+    }
+
+    const started = !state.running && state.queue.length === 0;
+    const job: ChatJob = {
+      id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      label,
+      createdAt: Date.now(),
+      run,
+    };
+    state.queue.push(job);
+    const position = started ? 0 : state.queue.length;
+    runNextChatJob(chatId);
+    return {
+      started,
+      position,
+      queueSize: state.queue.length + (state.running ? 1 : 0),
+    };
+  };
+
+  const cancelChatJobs = (
+    chatId: number,
+  ): {
+    queuedCleared: number;
+    runningCancelled: boolean;
+    runningLabel: string;
+  } => {
+    const state = chatQueues.get(chatId);
+    if (!state) {
+      return {
+        queuedCleared: 0,
+        runningCancelled: false,
+        runningLabel: "-",
+      };
+    }
+
+    const queuedCleared = state.queue.length;
+    state.queue = [];
+    const runningCancelled = Boolean(state.running && state.runningCancelRef);
+    if (state.runningCancelRef) {
+      state.runningCancelRef.cancelled = true;
+    }
+    const runningLabel = state.running?.label ?? "-";
+
+    if (!state.running) {
+      chatQueues.delete(chatId);
+    }
+
+    return { queuedCleared, runningCancelled, runningLabel };
+  };
+
+  const queueStats = (): {
+    activeChats: number;
+    runningJobs: number;
+    queuedJobs: number;
+  } => {
+    let runningJobs = 0;
+    let queuedJobs = 0;
+
+    for (const state of chatQueues.values()) {
+      if (state.running) {
+        runningJobs += 1;
+      }
+      queuedJobs += state.queue.length;
+    }
+
+    return {
+      activeChats: chatQueues.size,
+      runningJobs,
+      queuedJobs,
+    };
+  };
+
+  const clearRuntimeCaches = (): {
+    extractCacheCount: number;
+    subtitleSessionCount: number;
+    rateLimitCount: number;
+  } => {
+    const extractCacheCount = extractCache.size;
+    const subtitleSessionCount = subtitleSessions.size;
+    const rateLimitCount = userRateLimitBuckets.size;
+
+    extractCache.clear();
+    subtitleSessions.clear();
+    userRateLimitBuckets.clear();
+
+    return { extractCacheCount, subtitleSessionCount, rateLimitCount };
+  };
 
   await logger.info("bot started", {
     outputRoot: config.outputRoot,
@@ -1195,6 +1637,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           offset = update.update_id + 1;
 
           cleanupSubtitleSessions(subtitleSessions);
+          cleanupExtractCache(extractCache, extractCacheMaxEntries);
 
           const callback = update.callback_query;
           if (callback) {
@@ -1266,100 +1709,159 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               continue;
             }
 
+            const callbackUserId = callback.from?.id ?? callbackChatId;
+            const callbackRateLimit = consumeRateLimit(callbackUserId);
+            if (!callbackRateLimit.allowed) {
+              await api.answerCallbackQuery(
+                callback.id,
+                `Terlalu sering. Coba lagi ${callbackRateLimit.retryAfterSec}s.`,
+              );
+              continue;
+            }
+
             subtitleSessions.delete(callbackData.sessionId);
-            await api.answerCallbackQuery(
-              callback.id,
-              `Memproses subtitle ${callbackData.language}...`,
-            );
-            await logger.info("subtitle callback selected", {
-              chatId: callbackChatId,
-              language: callbackData.language,
-              title: session.title,
-            });
-
-            const statusMessageId = await api.sendMessage(
+            const queuedSubtitleJob = enqueueChatJob(
               callbackChatId,
-              buildStatusCard("⏳ [1/4] Menyiapkan subtitle", [
-                { label: "URL", value: session.url },
-                { label: "Bahasa", value: callbackData.language },
-              ]),
+              `subtitle:${callbackData.language}`,
+              async (cancelToken) => {
+                await logger.info("subtitle callback selected", {
+                  chatId: callbackChatId,
+                  language: callbackData.language,
+                  title: session.title,
+                });
+
+                if (cancelToken.isCancelled()) {
+                  await api.sendMessage(
+                    callbackChatId,
+                    "Job subtitle dibatalkan sebelum diproses.",
+                  );
+                  return;
+                }
+
+                const statusMessageId = await api.sendMessage(
+                  callbackChatId,
+                  buildStatusCard("⏳ [1/4] Menyiapkan subtitle", [
+                    { label: "URL", value: session.url },
+                    { label: "Bahasa", value: callbackData.language },
+                  ]),
+                );
+
+                try {
+                  await api.editMessage(
+                    callbackChatId,
+                    statusMessageId,
+                    buildStatusCard("⏳ [2/4] Mengunduh subtitle", [
+                      { label: "Judul", value: session.title },
+                      { label: "Bahasa", value: callbackData.language },
+                    ]),
+                  );
+
+                  const subtitleResult = await downloadSubtitlesAndConvert(
+                    session.url,
+                    callbackData.language,
+                    config.outputRoot,
+                    { includeTimestamp: isSubtitleTimestampEnabled() },
+                  );
+
+                  if (cancelToken.isCancelled()) {
+                    await api.editMessage(
+                      callbackChatId,
+                      statusMessageId,
+                      buildStatusCard("🛑 Subtitle dibatalkan", [
+                        { label: "Judul", value: subtitleResult.title },
+                        { label: "Bahasa", value: subtitleResult.language },
+                      ]),
+                    );
+                    return;
+                  }
+
+                  await api.editMessage(
+                    callbackChatId,
+                    statusMessageId,
+                    buildStatusCard("⏳ [3/4] Mengirim file subtitle", [
+                      { label: "Judul", value: subtitleResult.title },
+                      { label: "Bahasa", value: subtitleResult.language },
+                      {
+                        label: "Timestamp",
+                        value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                      },
+                    ]),
+                  );
+
+                  const sent = await sendSubtitleFiles(api, callbackChatId, [
+                    subtitleResult.srtPath,
+                    subtitleResult.vttPath,
+                    subtitleResult.txtPath,
+                    subtitleResult.mdPath,
+                  ]);
+
+                  await api.editMessage(
+                    callbackChatId,
+                    statusMessageId,
+                    buildStatusCard("✅ [4/4] Subtitle selesai", [
+                      { label: "Judul", value: subtitleResult.title },
+                      { label: "Bahasa", value: subtitleResult.language },
+                      {
+                        label: "Timestamp",
+                        value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                      },
+                      { label: "File terkirim", value: sent.sent },
+                      { label: "File gagal", value: sent.failed },
+                      {
+                        label: "Folder output",
+                        value: subtitleResult.outputDir,
+                      },
+                    ]),
+                  );
+                  await logger.info("subtitle completed", {
+                    chatId: callbackChatId,
+                    title: subtitleResult.title,
+                    language: subtitleResult.language,
+                    sent: sent.sent,
+                    failed: sent.failed,
+                  });
+                } catch (error) {
+                  const errorMessage =
+                    error instanceof Error ? error.message : "Unknown error";
+                  await api.editMessage(
+                    callbackChatId,
+                    statusMessageId,
+                    buildStatusCard("❌ Subtitle gagal diproses", [
+                      { label: "Detail", value: errorMessage.slice(0, 350) },
+                    ]),
+                  );
+                  await logger.error("subtitle callback failed", error, {
+                    chatId: callbackChatId,
+                    language: callbackData.language,
+                    url: session.url,
+                  });
+                }
+              },
             );
 
-            let subtitleResult;
-            try {
-              await api.editMessage(
+            if (queuedSubtitleJob.position < 0) {
+              await api.answerCallbackQuery(callback.id, "Antrian penuh.");
+              await api.sendMessage(
                 callbackChatId,
-                statusMessageId,
-                buildStatusCard("⏳ [2/4] Mengunduh subtitle", [
-                  { label: "Judul", value: session.title },
-                  { label: "Bahasa", value: callbackData.language },
-                ]),
+                "Antrian sedang penuh. Coba lagi beberapa saat.",
               );
+              continue;
+            }
 
-              subtitleResult = await downloadSubtitlesAndConvert(
-                session.url,
-                callbackData.language,
-                config.outputRoot,
-                { includeTimestamp: isSubtitleTimestampEnabled() },
+            if (queuedSubtitleJob.started) {
+              await api.answerCallbackQuery(
+                callback.id,
+                `Memproses subtitle ${callbackData.language}...`,
               );
-
-              await api.editMessage(
+            } else {
+              await api.answerCallbackQuery(
+                callback.id,
+                `Masuk antrian #${queuedSubtitleJob.position}`,
+              );
+              await api.sendMessage(
                 callbackChatId,
-                statusMessageId,
-                buildStatusCard("⏳ [3/4] Mengirim file subtitle", [
-                  { label: "Judul", value: subtitleResult.title },
-                  { label: "Bahasa", value: subtitleResult.language },
-                  {
-                    label: "Timestamp",
-                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
-                  },
-                ]),
+                `⏳ Job subtitle masuk antrian #${queuedSubtitleJob.position}.`,
               );
-
-              const sent = await sendSubtitleFiles(api, callbackChatId, [
-                subtitleResult.srtPath,
-                subtitleResult.vttPath,
-                subtitleResult.txtPath,
-                subtitleResult.mdPath,
-              ]);
-
-              await api.editMessage(
-                callbackChatId,
-                statusMessageId,
-                buildStatusCard("✅ [4/4] Subtitle selesai", [
-                  { label: "Judul", value: subtitleResult.title },
-                  { label: "Bahasa", value: subtitleResult.language },
-                  {
-                    label: "Timestamp",
-                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
-                  },
-                  { label: "File terkirim", value: sent.sent },
-                  { label: "File gagal", value: sent.failed },
-                  { label: "Folder output", value: subtitleResult.outputDir },
-                ]),
-              );
-              await logger.info("subtitle completed", {
-                chatId: callbackChatId,
-                title: subtitleResult.title,
-                language: subtitleResult.language,
-                sent: sent.sent,
-                failed: sent.failed,
-              });
-            } catch (error) {
-              const errorMessage =
-                error instanceof Error ? error.message : "Unknown error";
-              await api.editMessage(
-                callbackChatId,
-                statusMessageId,
-                buildStatusCard("❌ Subtitle gagal diproses", [
-                  { label: "Detail", value: errorMessage.slice(0, 350) },
-                ]),
-              );
-              await logger.error("subtitle callback failed", error, {
-                chatId: callbackChatId,
-                language: callbackData.language,
-                url: session.url,
-              });
             }
             continue;
           }
@@ -1398,6 +1900,18 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           await logger.info("message received", { chatId, text: commandInput });
           const command = parseTelegramCommand(commandInput);
           const commandRoot = commandInput.split(/\s+/)[0]?.toLowerCase() ?? "";
+          const userId = update.message?.from?.id ?? chatId;
+
+          if (isCommandRateLimited(command)) {
+            const commandRateLimit = consumeRateLimit(userId);
+            if (!commandRateLimit.allowed) {
+              await api.sendMessage(
+                chatId,
+                `Terlalu banyak request. Coba lagi dalam ${commandRateLimit.retryAfterSec} detik.`,
+              );
+              continue;
+            }
+          }
 
           if (command.kind === "help") {
             if (commandRoot === "/start" || commandRoot === "/menu") {
@@ -1412,6 +1926,175 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               chatId,
               buildHelpMessage(),
               buildMainMenuKeyboard(),
+            );
+            continue;
+          }
+
+          if (command.kind === "cancel") {
+            const cancelled = cancelChatJobs(chatId);
+            await api.sendMessage(
+              chatId,
+              buildStatusCard("Status cancel job", [
+                {
+                  label: "Running dibatalkan",
+                  value: cancelled.runningCancelled ? "YA" : "TIDAK",
+                },
+                { label: "Job aktif", value: cancelled.runningLabel },
+                { label: "Antrian dihapus", value: cancelled.queuedCleared },
+              ]),
+            );
+            continue;
+          }
+
+          if (command.kind === "stats") {
+            cleanupExtractCache(extractCache, extractCacheMaxEntries);
+            cleanupSubtitleSessions(subtitleSessions);
+            const queue = queueStats();
+            const memory = process.memoryUsage();
+            const uptimeSec = Math.floor((Date.now() - botStartedAt) / 1000);
+            await api.sendMessage(
+              chatId,
+              buildStatusCard("Bot runtime stats", [
+                { label: "Uptime", value: `${uptimeSec}s` },
+                { label: "Queue chat aktif", value: queue.activeChats },
+                { label: "Queue running", value: queue.runningJobs },
+                { label: "Queue menunggu", value: queue.queuedJobs },
+                { label: "Extract cache", value: extractCache.size },
+                { label: "Subtitle session", value: subtitleSessions.size },
+                { label: "Rate buckets", value: userRateLimitBuckets.size },
+                {
+                  label: "RSS",
+                  value: `${Math.round(memory.rss / (1024 * 1024))} MB`,
+                },
+                {
+                  label: "Heap used",
+                  value: `${Math.round(memory.heapUsed / (1024 * 1024))} MB`,
+                },
+              ]),
+            );
+            continue;
+          }
+
+          if (command.kind === "clearCache") {
+            const cleared = clearRuntimeCaches();
+            await api.sendMessage(
+              chatId,
+              buildStatusCard("Cache runtime dibersihkan", [
+                { label: "Extract cache", value: cleared.extractCacheCount },
+                {
+                  label: "Subtitle session",
+                  value: cleared.subtitleSessionCount,
+                },
+                { label: "Rate bucket", value: cleared.rateLimitCount },
+              ]),
+            );
+            continue;
+          }
+
+          if (command.kind === "cleanOutput") {
+            if (command.scope === "all") {
+              await rm(`${config.outputRoot}/sites`, {
+                recursive: true,
+                force: true,
+              });
+              await rm(`${config.outputRoot}/runs-manifest.json`, {
+                force: true,
+              });
+              extractCache.clear();
+              await api.sendMessage(
+                chatId,
+                "Output berhasil dibersihkan untuk semua site.",
+              );
+              continue;
+            }
+
+            const site = parseSiteScope(command.site);
+            if (!site) {
+              await api.sendMessage(
+                chatId,
+                "Format site tidak valid. Gunakan /cleanoutput <all|site>.",
+              );
+              continue;
+            }
+
+            await rm(`${config.outputRoot}/sites/${site}`, {
+              recursive: true,
+              force: true,
+            });
+
+            const runs = await readManifest(config.outputRoot);
+            const filtered = runs.filter((item) => item.site !== site);
+            await writeManifest(config.outputRoot, filtered);
+            for (const [cacheKey, entry] of extractCache) {
+              if (entry.extraction.site === site) {
+                extractCache.delete(cacheKey);
+              }
+            }
+
+            await api.sendMessage(
+              chatId,
+              `Output site ${site} berhasil dihapus.`,
+            );
+            continue;
+          }
+
+          if (command.kind === "cleanDownloads") {
+            const site = parseSiteScope(command.site);
+            const root =
+              command.scope === "all"
+                ? `${config.outputRoot}/sites`
+                : `${config.outputRoot}/sites/${site}`;
+
+            if (command.scope === "site" && !site) {
+              await api.sendMessage(
+                chatId,
+                "Format site tidak valid. Gunakan /cleandownloads <all|site>.",
+              );
+              continue;
+            }
+
+            const removedDirs = await removeDirectoriesByName(
+              root,
+              "subtitles",
+            );
+            await api.sendMessage(
+              chatId,
+              `Cleanup download selesai. Folder subtitles terhapus: ${removedDirs}.`,
+            );
+            continue;
+          }
+
+          if (command.kind === "clearChat") {
+            const anchorId = update.message?.message_id;
+            if (!anchorId) {
+              await api.sendMessage(chatId, "Message anchor tidak tersedia.");
+              continue;
+            }
+
+            let deleted = 0;
+            const maxScan = Math.max(
+              command.limit,
+              command.limit * CLEAN_CHAT_SCAN_MULTIPLIER,
+            );
+            for (
+              let offsetIndex = 0;
+              offsetIndex < maxScan && deleted < command.limit;
+              offsetIndex += 1
+            ) {
+              const targetMessageId = anchorId - offsetIndex;
+              if (targetMessageId <= 0) {
+                break;
+              }
+
+              const ok = await api.deleteMessage(chatId, targetMessageId);
+              if (ok) {
+                deleted += 1;
+              }
+            }
+
+            await api.sendMessage(
+              chatId,
+              `Clear chat selesai. Message terhapus: ${deleted}/${command.limit}.`,
             );
             continue;
           }
@@ -1463,175 +2146,240 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           }
 
           if (command.kind === "subtitle") {
-            await api.sendChatAction(chatId, "typing");
-            const statusMessageId = await api.sendMessage(
+            const queuedSubtitleListJob = enqueueChatJob(
               chatId,
-              buildStatusCard("⏳ [1/2] Mengecek subtitle", [
-                { label: "URL", value: command.url },
-              ]),
-            );
-            try {
-              const listed = await listAvailableSubtitles(command.url);
-              const resolvedOriginal = resolveOriginalLanguage(
-                listed.languages,
-                listed.originalLanguage,
-              );
-              const preferred = pickPreferredSubtitleLanguages(
-                listed.languages,
-                resolvedOriginal,
-              );
-
-              if (preferred.length === 0) {
-                await api.editMessage(
+              `subtitle:list:${command.url}`,
+              async (cancelToken) => {
+                await api.sendChatAction(chatId, "typing");
+                const statusMessageId = await api.sendMessage(
                   chatId,
-                  statusMessageId,
-                  buildStatusCard("❌ Subtitle tidak tersedia", [
-                    { label: "Judul", value: listed.title },
-                    { label: "URL", value: listed.webpageUrl },
+                  buildStatusCard("⏳ [1/2] Mengecek subtitle", [
+                    { label: "URL", value: command.url },
                   ]),
                 );
-                continue;
-              }
 
-              const sessionId = createSubtitleSessionId();
-              subtitleSessions.set(sessionId, {
-                chatId,
-                url: command.url,
-                title: listed.title,
-                languages: new Set(preferred.map((item) => item.code)),
-                createdAt: Date.now(),
-              });
-              cleanupSubtitleSessions(subtitleSessions);
+                try {
+                  if (cancelToken.isCancelled()) {
+                    await api.editMessage(
+                      chatId,
+                      statusMessageId,
+                      "🛑 Job subtitle dibatalkan.",
+                    );
+                    return;
+                  }
 
-              const keyboard = buildSubtitleKeyboard(sessionId, preferred);
-              await api.editMessage(
+                  const listed = await listAvailableSubtitles(command.url);
+                  const resolvedOriginal = resolveOriginalLanguage(
+                    listed.languages,
+                    listed.originalLanguage,
+                  );
+                  const preferred = pickPreferredSubtitleLanguages(
+                    listed.languages,
+                    resolvedOriginal,
+                  );
+
+                  if (preferred.length === 0) {
+                    await api.editMessage(
+                      chatId,
+                      statusMessageId,
+                      buildStatusCard("❌ Subtitle tidak tersedia", [
+                        { label: "Judul", value: listed.title },
+                        { label: "URL", value: listed.webpageUrl },
+                      ]),
+                    );
+                    return;
+                  }
+
+                  const sessionId = createSubtitleSessionId();
+                  subtitleSessions.set(sessionId, {
+                    chatId,
+                    url: command.url,
+                    title: listed.title,
+                    languages: new Set(preferred.map((item) => item.code)),
+                    createdAt: Date.now(),
+                  });
+                  cleanupSubtitleSessions(subtitleSessions);
+
+                  const keyboard = buildSubtitleKeyboard(sessionId, preferred);
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    [
+                      buildStatusCard("✅ [2/2] Subtitle ditemukan", [
+                        { label: "Judul", value: listed.title },
+                        { label: "Extractor", value: listed.extractorKey },
+                        {
+                          label: "Bahasa original",
+                          value: resolvedOriginal ?? "-",
+                        },
+                        {
+                          label: "Bahasa ditampilkan",
+                          value: preferred.length,
+                        },
+                        {
+                          label: "Timestamp saat ini",
+                          value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                        },
+                      ]),
+                      "",
+                      "Bahasa pilihan (original/en/id):",
+                      renderSubtitleLanguageList(preferred),
+                      "",
+                      "Bahasa YouTube tersedia:",
+                      renderAllYoutubeLanguages(listed.languages),
+                      "",
+                      "Keterangan tombol: [M]=manual, [A]=auto",
+                      "Pilih bahasa subtitle dari tombol di bawah.",
+                    ].join("\n"),
+                  );
+                  await api.sendMessage(
+                    chatId,
+                    "Pilih bahasa subtitle:",
+                    keyboard,
+                  );
+
+                  await logger.info("subtitle listed", {
+                    chatId,
+                    title: listed.title,
+                    url: listed.webpageUrl,
+                    languages: listed.languages.length,
+                  });
+                } catch (error) {
+                  const detail =
+                    error instanceof Error ? error.message : String(error);
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("❌ Gagal mengecek subtitle", [
+                      { label: "URL", value: command.url },
+                      { label: "Detail", value: detail.slice(0, 350) },
+                    ]),
+                  );
+                  await logger.error("subtitle list failed", error, {
+                    chatId,
+                    url: command.url,
+                  });
+                }
+              },
+            );
+
+            if (queuedSubtitleListJob.position < 0) {
+              await api.sendMessage(
                 chatId,
-                statusMessageId,
-                [
-                  buildStatusCard("✅ [2/2] Subtitle ditemukan", [
-                    { label: "Judul", value: listed.title },
-                    { label: "Extractor", value: listed.extractorKey },
-                    {
-                      label: "Bahasa original",
-                      value: resolvedOriginal ?? "-",
-                    },
-                    { label: "Bahasa ditampilkan", value: preferred.length },
-                    {
-                      label: "Timestamp saat ini",
-                      value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
-                    },
-                  ]),
-                  "",
-                  "Bahasa pilihan (original/en/id):",
-                  renderSubtitleLanguageList(preferred),
-                  "",
-                  "Bahasa YouTube tersedia:",
-                  renderAllYoutubeLanguages(listed.languages),
-                  "",
-                  "Keterangan tombol: [M]=manual, [A]=auto",
-                  "Pilih bahasa subtitle dari tombol di bawah.",
-                ].join("\n"),
+                "Antrian subtitle penuh. Coba lagi beberapa saat.",
               );
-              await api.sendMessage(chatId, "Pilih bahasa subtitle:", keyboard);
+              continue;
+            }
 
-              await logger.info("subtitle listed", {
+            if (!queuedSubtitleListJob.started) {
+              await api.sendMessage(
                 chatId,
-                title: listed.title,
-                url: listed.webpageUrl,
-                languages: listed.languages.length,
-              });
-            } catch (error) {
-              const detail =
-                error instanceof Error ? error.message : String(error);
-              await api.editMessage(
-                chatId,
-                statusMessageId,
-                buildStatusCard("❌ Gagal mengecek subtitle", [
-                  { label: "URL", value: command.url },
-                  { label: "Detail", value: detail.slice(0, 350) },
-                ]),
+                `⏳ Job subtitle masuk antrian #${queuedSubtitleListJob.position}.`,
               );
-              await logger.error("subtitle list failed", error, {
-                chatId,
-                url: command.url,
-              });
             }
             continue;
           }
 
           if (command.kind === "mark") {
-            await api.sendChatAction(chatId, "typing");
-            const statusMessageId = await api.sendMessage(
+            const queuedMarkJob = enqueueChatJob(
               chatId,
-              buildStatusCard("⏳ [1/3] Memproses /mark", [
-                { label: "URL", value: command.url },
-              ]),
+              `mark:${command.url}`,
+              async (cancelToken) => {
+                await api.sendChatAction(chatId, "typing");
+                const statusMessageId = await api.sendMessage(
+                  chatId,
+                  buildStatusCard("⏳ [1/3] Memproses /mark", [
+                    { label: "URL", value: command.url },
+                  ]),
+                );
+
+                try {
+                  const marked = await extractWithMarkdownNew(
+                    command.url,
+                    config.outputRoot,
+                  );
+
+                  if (cancelToken.isCancelled()) {
+                    await api.editMessage(
+                      chatId,
+                      statusMessageId,
+                      "🛑 Job /mark dibatalkan.",
+                    );
+                    return;
+                  }
+
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("✅ [2/3] Markdown berhasil dibuat", [
+                      { label: "Title", value: marked.title },
+                      { label: "Method", value: marked.method },
+                      {
+                        label: "Tokens",
+                        value: marked.tokens ?? "n/a",
+                      },
+                    ]),
+                  );
+
+                  await api.sendChatAction(chatId, "upload_document");
+                  await api.sendDocument(
+                    chatId,
+                    marked.markdownPath,
+                    "Markdown (.md)",
+                    "mark.md",
+                  );
+                  await api.sendChatAction(chatId, "upload_document");
+                  await api.sendDocument(
+                    chatId,
+                    marked.textPath,
+                    "Markdown mirror (.txt)",
+                    "mark.txt",
+                  );
+
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("✅ [3/3] /mark selesai", [
+                      { label: "Output", value: marked.outputDir },
+                      { label: "File", value: "mark.md + mark.txt" },
+                    ]),
+                  );
+
+                  await logger.info("mark completed", {
+                    chatId,
+                    url: command.url,
+                    title: marked.title,
+                    method: marked.method,
+                    tokens: marked.tokens,
+                  });
+                } catch (error) {
+                  const detail =
+                    error instanceof Error ? error.message : String(error);
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("❌ /mark gagal", [
+                      { label: "Detail", value: detail.slice(0, 350) },
+                    ]),
+                  );
+                  await logger.error("mark failed", error, {
+                    chatId,
+                    url: command.url,
+                  });
+                }
+              },
             );
 
-            try {
-              const marked = await extractWithMarkdownNew(
-                command.url,
-                config.outputRoot,
-              );
+            if (queuedMarkJob.position < 0) {
+              await api.sendMessage(chatId, "Antrian /mark penuh. Coba lagi.");
+              continue;
+            }
 
-              await api.editMessage(
+            if (!queuedMarkJob.started) {
+              await api.sendMessage(
                 chatId,
-                statusMessageId,
-                buildStatusCard("✅ [2/3] Markdown berhasil dibuat", [
-                  { label: "Title", value: marked.title },
-                  { label: "Method", value: marked.method },
-                  {
-                    label: "Tokens",
-                    value: marked.tokens ?? "n/a",
-                  },
-                ]),
+                `⏳ Job /mark masuk antrian #${queuedMarkJob.position}.`,
               );
-
-              await api.sendChatAction(chatId, "upload_document");
-              await api.sendDocument(
-                chatId,
-                marked.markdownPath,
-                "Markdown (.md)",
-                "mark.md",
-              );
-              await api.sendChatAction(chatId, "upload_document");
-              await api.sendDocument(
-                chatId,
-                marked.textPath,
-                "Markdown mirror (.txt)",
-                "mark.txt",
-              );
-
-              await api.editMessage(
-                chatId,
-                statusMessageId,
-                buildStatusCard("✅ [3/3] /mark selesai", [
-                  { label: "Output", value: marked.outputDir },
-                  { label: "File", value: "mark.md + mark.txt" },
-                ]),
-              );
-
-              await logger.info("mark completed", {
-                chatId,
-                url: command.url,
-                title: marked.title,
-                method: marked.method,
-                tokens: marked.tokens,
-              });
-            } catch (error) {
-              const detail =
-                error instanceof Error ? error.message : String(error);
-              await api.editMessage(
-                chatId,
-                statusMessageId,
-                buildStatusCard("❌ /mark gagal", [
-                  { label: "Detail", value: detail.slice(0, 350) },
-                ]),
-              );
-              await logger.error("mark failed", error, {
-                chatId,
-                url: command.url,
-              });
             }
             continue;
           }
@@ -1763,238 +2511,404 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           }
 
           if (command.kind === "extract") {
-            const extractStartedAt = Date.now();
-            let lastStatusText = "";
-            let lastStatusAt = 0;
-            let liveStatusText = "";
-            let lastProgressAt = Date.now();
-            let heartbeatBusy = false;
-            const safeStatusUpdate = async (
-              messageId: number,
-              textValue: string,
-            ): Promise<void> => {
-              const now = Date.now();
-              const isFinal =
-                textValue.startsWith("✅") || textValue.includes("[5/5]");
-              if (textValue === lastStatusText) {
-                return;
-              }
-              if (!isFinal && now - lastStatusAt < 900) {
-                return;
-              }
-
-              try {
-                await api.sendChatAction(chatId, "typing");
-                await api.editMessage(chatId, messageId, textValue);
-                lastStatusText = textValue;
-                lastStatusAt = now;
-              } catch (error) {
-                await logger.warn("status update failed", {
-                  chatId,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              }
-            };
-
-            await api.sendChatAction(chatId, "typing");
-            const statusMessageId = await api.sendMessage(
+            const queuedExtractJob = enqueueChatJob(
               chatId,
-              buildStatusCard("⏳ [1/5] Memulai extract", [
-                { label: "URL", value: command.url },
-                { label: "Maks halaman", value: command.maxPages },
-              ]),
-            );
-            liveStatusText = buildStatusCard("⏳ [1/5] Memulai extract", [
-              { label: "URL", value: command.url },
-              { label: "Maks halaman", value: command.maxPages },
-            ]);
-            await logger.info("extract started", {
-              chatId,
-              url: command.url,
-              maxPages: command.maxPages,
-            });
-
-            const heartbeat = setInterval(async () => {
-              if (heartbeatBusy) {
-                return;
-              }
-              heartbeatBusy = true;
-              try {
-                const now = Date.now();
-                if (now - lastProgressAt < 12_000) {
-                  return;
-                }
-                const elapsed = Math.floor((now - extractStartedAt) / 1000);
-                await safeStatusUpdate(
-                  statusMessageId,
-                  `${liveStatusText}\n${renderField("Durasi proses", `${elapsed}s`)}`,
+              `extract:${command.url}`,
+              async (cancelToken) => {
+                const cacheKey = buildExtractCacheKey(
+                  command.url,
+                  command.maxPages,
                 );
-              } catch {
-                // noop
-              } finally {
-                heartbeatBusy = false;
-              }
-            }, 12_000);
+                const extractStartedAt = Date.now();
+                let lastStatusText = "";
+                let lastStatusAt = 0;
+                let liveStatusText = "";
+                let lastProgressAt = Date.now();
+                let heartbeatBusy = false;
 
-            let extraction;
-            try {
-              extraction = await runExtraction(
-                {
-                  rootUrl: command.url,
-                  maxPages: command.maxPages,
-                  outputRoot: config.outputRoot,
-                },
-                {
-                  includePagesInResponse: false,
-                  onProgress: async (progress) => {
-                    const statusMap: Record<string, string> = {
-                      init: "⏳ [1/5] Menyiapkan proses",
-                      crawl: "⏳ [2/5] Mengambil konten website",
-                      files: "⏳ [3/5] Menyusun file MD/TXT",
-                      save: "⏳ [4/5] Menyimpan hasil",
-                      done: "⏳ [5/5] Menyelesaikan proses",
-                    };
-                    const prefix =
-                      statusMap[progress.step] ?? "⏳ [..] Processing";
-                    const statusText = buildStatusCard(prefix, [
-                      { label: "Detail", value: progress.message },
-                    ]);
-                    liveStatusText = statusText;
-                    lastProgressAt = Date.now();
-                    await logger.info("extract progress", {
+                const safeStatusUpdate = async (
+                  messageId: number,
+                  textValue: string,
+                ): Promise<void> => {
+                  const now = Date.now();
+                  const isFinal =
+                    textValue.startsWith("✅") || textValue.includes("[5/5]");
+                  if (textValue === lastStatusText) {
+                    return;
+                  }
+                  if (!isFinal && now - lastStatusAt < 900) {
+                    return;
+                  }
+
+                  try {
+                    await api.sendChatAction(chatId, "typing");
+                    await api.editMessage(chatId, messageId, textValue);
+                    lastStatusText = textValue;
+                    lastStatusAt = now;
+                  } catch (error) {
+                    await logger.warn("status update failed", {
                       chatId,
-                      url: command.url,
-                      step: progress.step,
-                      detail: progress.message,
+                      error:
+                        error instanceof Error ? error.message : String(error),
                     });
+                  }
+                };
 
-                    await safeStatusUpdate(statusMessageId, statusText);
-                  },
-                },
-              );
-            } finally {
-              clearInterval(heartbeat);
-            }
+                await api.sendChatAction(chatId, "typing");
+                const statusMessageId = await api.sendMessage(
+                  chatId,
+                  buildStatusCard("⏳ [1/5] Memulai extract", [
+                    { label: "URL", value: command.url },
+                    { label: "Maks halaman", value: command.maxPages },
+                  ]),
+                );
+                liveStatusText = buildStatusCard("⏳ [1/5] Memulai extract", [
+                  { label: "URL", value: command.url },
+                  { label: "Maks halaman", value: command.maxPages },
+                ]);
 
-            await safeStatusUpdate(
-              statusMessageId,
-              buildStatusCard("✅ [5/5] Extract selesai", [
-                { label: "Status", value: "Sedang mengirim file hasil" },
-              ]),
+                const heartbeat = setInterval(async () => {
+                  if (heartbeatBusy) {
+                    return;
+                  }
+                  heartbeatBusy = true;
+                  try {
+                    const now = Date.now();
+                    if (now - lastProgressAt < 12_000) {
+                      return;
+                    }
+                    const elapsed = Math.floor((now - extractStartedAt) / 1000);
+                    await safeStatusUpdate(
+                      statusMessageId,
+                      `${liveStatusText}\n${renderField("Durasi proses", `${elapsed}s`)}`,
+                    );
+                  } catch {
+                    // noop
+                  } finally {
+                    heartbeatBusy = false;
+                  }
+                }, 12_000);
+
+                try {
+                  cleanupExtractCache(extractCache, extractCacheMaxEntries);
+                  const cached = extractCache.get(cacheKey);
+                  if (cached && cached.expiresAt > Date.now()) {
+                    const resultFileExists = await Bun.file(
+                      cached.extraction.resultFile,
+                    ).exists();
+                    if (resultFileExists && !cancelToken.isCancelled()) {
+                      await safeStatusUpdate(
+                        statusMessageId,
+                        buildStatusCard("⚡ [cache] Extract dari cache", [
+                          { label: "Run ID", value: cached.extraction.runId },
+                          { label: "Site", value: cached.extraction.site },
+                          {
+                            label: "Halaman dicrawl",
+                            value: cached.extraction.crawledPages,
+                          },
+                        ]),
+                      );
+
+                      await api.sendChatAction(chatId, "upload_document");
+                      await api.sendMessage(
+                        chatId,
+                        buildStatusCard("Ringkasan hasil extract (cache)", [
+                          { label: "Run ID", value: cached.extraction.runId },
+                          { label: "Site", value: cached.extraction.site },
+                          {
+                            label: "Halaman dicrawl",
+                            value: cached.extraction.crawledPages,
+                          },
+                          {
+                            label: "File markdown",
+                            value: cached.extraction.markdownFiles.length,
+                          },
+                          {
+                            label: "File text",
+                            value: cached.extraction.textFiles.length,
+                          },
+                          {
+                            label: "Result JSON",
+                            value: cached.extraction.resultFile,
+                          },
+                        ]),
+                      );
+
+                      const resultJsonName = `${cached.extraction.site}__extract.json`;
+                      await api.sendDocument(
+                        chatId,
+                        cached.extraction.resultFile,
+                        "Result JSON (cache)",
+                        resultJsonName,
+                      );
+                      const markdownStats = await sendFilesBatch(
+                        api,
+                        logger,
+                        chatId,
+                        "Markdown",
+                        cached.extraction.markdownFiles,
+                        (textValue) =>
+                          safeStatusUpdate(statusMessageId, textValue),
+                      );
+                      const textStats = await sendFilesBatch(
+                        api,
+                        logger,
+                        chatId,
+                        "Text",
+                        cached.extraction.textFiles,
+                        (textValue) =>
+                          safeStatusUpdate(statusMessageId, textValue),
+                      );
+                      await safeStatusUpdate(
+                        statusMessageId,
+                        buildStatusCard("✅ [cache] Proses selesai", [
+                          {
+                            label: "Markdown (terkirim/gagal)",
+                            value: `${markdownStats.sent}/${markdownStats.failed}`,
+                          },
+                          {
+                            label: "Text (terkirim/gagal)",
+                            value: `${textStats.sent}/${textStats.failed}`,
+                          },
+                        ]),
+                      );
+                      return;
+                    }
+                    extractCache.delete(cacheKey);
+                  }
+
+                  if (cancelToken.isCancelled()) {
+                    await safeStatusUpdate(
+                      statusMessageId,
+                      "🛑 Job extract dibatalkan sebelum proses crawl.",
+                    );
+                    return;
+                  }
+
+                  await logger.info("extract started", {
+                    chatId,
+                    url: command.url,
+                    maxPages: command.maxPages,
+                  });
+
+                  let extraction;
+                  try {
+                    extraction = await runExtraction(
+                      {
+                        rootUrl: command.url,
+                        maxPages: command.maxPages,
+                        outputRoot: config.outputRoot,
+                      },
+                      {
+                        includePagesInResponse: false,
+                        shouldCancel: () => cancelToken.isCancelled(),
+                        onProgress: async (progress) => {
+                          const statusMap: Record<string, string> = {
+                            init: "⏳ [1/5] Menyiapkan proses",
+                            crawl: "⏳ [2/5] Mengambil konten website",
+                            files: "⏳ [3/5] Menyusun file MD/TXT",
+                            save: "⏳ [4/5] Menyimpan hasil",
+                            done: "⏳ [5/5] Menyelesaikan proses",
+                          };
+                          const prefix =
+                            statusMap[progress.step] ?? "⏳ [..] Processing";
+                          const statusText = buildStatusCard(prefix, [
+                            { label: "Detail", value: progress.message },
+                          ]);
+                          liveStatusText = statusText;
+                          lastProgressAt = Date.now();
+                          await logger.info("extract progress", {
+                            chatId,
+                            url: command.url,
+                            step: progress.step,
+                            detail: progress.message,
+                          });
+
+                          await safeStatusUpdate(statusMessageId, statusText);
+                        },
+                      },
+                    );
+                  } catch (error) {
+                    if (cancelToken.isCancelled()) {
+                      await safeStatusUpdate(
+                        statusMessageId,
+                        "🛑 Job extract dibatalkan.",
+                      );
+                      return;
+                    }
+                    throw error;
+                  }
+
+                  if (cancelToken.isCancelled()) {
+                    await safeStatusUpdate(
+                      statusMessageId,
+                      "🛑 Job extract dibatalkan setelah crawl.",
+                    );
+                    return;
+                  }
+
+                  extractCache.set(cacheKey, {
+                    key: cacheKey,
+                    rootUrl: command.url,
+                    maxPages: command.maxPages,
+                    createdAt: Date.now(),
+                    expiresAt: Date.now() + extractCacheTtlMs,
+                    extraction: {
+                      runId: extraction.runId,
+                      site: extraction.site,
+                      resultFile: extraction.resultFile,
+                      markdownFiles: extraction.markdownFiles,
+                      textFiles: extraction.textFiles,
+                      crawledPages: extraction.result.crawledPages,
+                    },
+                  });
+                  cleanupExtractCache(extractCache, extractCacheMaxEntries);
+
+                  await safeStatusUpdate(
+                    statusMessageId,
+                    buildStatusCard("✅ [5/5] Extract selesai", [
+                      { label: "Status", value: "Sedang mengirim file hasil" },
+                    ]),
+                  );
+                  await api.sendChatAction(chatId, "upload_document");
+
+                  await api.sendMessage(
+                    chatId,
+                    buildStatusCard("Ringkasan hasil extract", [
+                      { label: "Run ID", value: extraction.runId },
+                      { label: "Site", value: extraction.site },
+                      {
+                        label: "Halaman dicrawl",
+                        value: extraction.result.crawledPages,
+                      },
+                      {
+                        label: "File markdown",
+                        value: extraction.markdownFiles.length,
+                      },
+                      {
+                        label: "File text",
+                        value: extraction.textFiles.length,
+                      },
+                      { label: "Result JSON", value: extraction.resultFile },
+                    ]),
+                  );
+
+                  try {
+                    const resultJsonName = `${extraction.site}__extract.json`;
+                    await api.sendDocument(
+                      chatId,
+                      extraction.resultFile,
+                      "Result JSON",
+                      resultJsonName,
+                    );
+                  } catch (error) {
+                    await logger.warn("failed to send result json", {
+                      chatId,
+                      path: extraction.resultFile,
+                      error:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                    await api.sendMessage(
+                      chatId,
+                      `Gagal kirim Result JSON: ${extraction.resultFile}`,
+                    );
+                  }
+                  await api.sendChatAction(chatId, "upload_document");
+                  const markdownStats = await sendFilesBatch(
+                    api,
+                    logger,
+                    chatId,
+                    "Markdown",
+                    extraction.markdownFiles,
+                    (textValue) => safeStatusUpdate(statusMessageId, textValue),
+                  );
+                  const textStats = await sendFilesBatch(
+                    api,
+                    logger,
+                    chatId,
+                    "Text",
+                    extraction.textFiles,
+                    (textValue) => safeStatusUpdate(statusMessageId, textValue),
+                  );
+                  let scribdStats: {
+                    docx: { sent: number; failed: number };
+                    pdf: { sent: number; failed: number };
+                    sourceTextFiles: number;
+                  } | null = null;
+
+                  if (
+                    isScribdSite(extraction.site) &&
+                    extraction.textFiles.length > 0 &&
+                    !cancelToken.isCancelled()
+                  ) {
+                    await safeStatusUpdate(
+                      statusMessageId,
+                      buildStatusCard("⏳ [5/5] Menyiapkan file Scribd", [
+                        { label: "Status", value: "Konversi ke DOCX dan PDF" },
+                      ]),
+                    );
+                    scribdStats = await sendScribdExportFiles(
+                      api,
+                      logger,
+                      chatId,
+                      extraction.textFiles,
+                      (textValue) =>
+                        safeStatusUpdate(statusMessageId, textValue),
+                    );
+                  }
+
+                  await safeStatusUpdate(
+                    statusMessageId,
+                    buildStatusCard("✅ [5/5] Proses selesai", [
+                      {
+                        label: "Markdown (terkirim/gagal)",
+                        value: `${markdownStats.sent}/${markdownStats.failed}`,
+                      },
+                      {
+                        label: "Text (terkirim/gagal)",
+                        value: `${textStats.sent}/${textStats.failed}`,
+                      },
+                      ...(scribdStats
+                        ? [
+                            {
+                              label: "DOCX (terkirim/gagal)",
+                              value: `${scribdStats.docx.sent}/${scribdStats.docx.failed}`,
+                            },
+                            {
+                              label: "PDF (terkirim/gagal)",
+                              value: `${scribdStats.pdf.sent}/${scribdStats.pdf.failed}`,
+                            },
+                          ]
+                        : []),
+                    ]),
+                  );
+                  await logger.info("extract completed", {
+                    chatId,
+                    runId: extraction.runId,
+                    site: extraction.site,
+                    crawledPages: extraction.result.crawledPages,
+                    durationMs: Date.now() - extractStartedAt,
+                  });
+                } finally {
+                  clearInterval(heartbeat);
+                }
+              },
             );
-            await api.sendChatAction(chatId, "upload_document");
 
-            await api.sendMessage(
-              chatId,
-              buildStatusCard("Ringkasan hasil extract", [
-                { label: "Run ID", value: extraction.runId },
-                { label: "Site", value: extraction.site },
-                {
-                  label: "Halaman dicrawl",
-                  value: extraction.result.crawledPages,
-                },
-                {
-                  label: "File markdown",
-                  value: extraction.markdownFiles.length,
-                },
-                { label: "File text", value: extraction.textFiles.length },
-                { label: "Result JSON", value: extraction.resultFile },
-              ]),
-            );
-
-            try {
-              const resultJsonName = `${extraction.site}__extract.json`;
-              await api.sendDocument(
-                chatId,
-                extraction.resultFile,
-                "Result JSON",
-                resultJsonName,
-              );
-            } catch (error) {
-              await logger.warn("failed to send result json", {
-                chatId,
-                path: extraction.resultFile,
-                error: error instanceof Error ? error.message : String(error),
-              });
+            if (queuedExtractJob.position < 0) {
               await api.sendMessage(
                 chatId,
-                `Gagal kirim Result JSON: ${extraction.resultFile}`,
+                "Antrian extract penuh. Coba lagi beberapa saat.",
               );
+              continue;
             }
-            await api.sendChatAction(chatId, "upload_document");
-            const markdownStats = await sendFilesBatch(
-              api,
-              logger,
-              chatId,
-              "Markdown",
-              extraction.markdownFiles,
-              (textValue) => safeStatusUpdate(statusMessageId, textValue),
-            );
-            const textStats = await sendFilesBatch(
-              api,
-              logger,
-              chatId,
-              "Text",
-              extraction.textFiles,
-              (textValue) => safeStatusUpdate(statusMessageId, textValue),
-            );
-            let scribdStats: {
-              docx: { sent: number; failed: number };
-              pdf: { sent: number; failed: number };
-              sourceTextFiles: number;
-            } | null = null;
 
-            if (
-              isScribdSite(extraction.site) &&
-              extraction.textFiles.length > 0
-            ) {
-              await safeStatusUpdate(
-                statusMessageId,
-                buildStatusCard("⏳ [5/5] Menyiapkan file Scribd", [
-                  { label: "Status", value: "Konversi ke DOCX dan PDF" },
-                ]),
-              );
-              scribdStats = await sendScribdExportFiles(
-                api,
-                logger,
+            if (!queuedExtractJob.started) {
+              await api.sendMessage(
                 chatId,
-                extraction.textFiles,
-                (textValue) => safeStatusUpdate(statusMessageId, textValue),
+                `⏳ Job extract masuk antrian #${queuedExtractJob.position}.`,
               );
             }
-
-            await safeStatusUpdate(
-              statusMessageId,
-              buildStatusCard("✅ [5/5] Proses selesai", [
-                {
-                  label: "Markdown (terkirim/gagal)",
-                  value: `${markdownStats.sent}/${markdownStats.failed}`,
-                },
-                {
-                  label: "Text (terkirim/gagal)",
-                  value: `${textStats.sent}/${textStats.failed}`,
-                },
-                ...(scribdStats
-                  ? [
-                      {
-                        label: "DOCX (terkirim/gagal)",
-                        value: `${scribdStats.docx.sent}/${scribdStats.docx.failed}`,
-                      },
-                      {
-                        label: "PDF (terkirim/gagal)",
-                        value: `${scribdStats.pdf.sent}/${scribdStats.pdf.failed}`,
-                      },
-                    ]
-                  : []),
-              ]),
-            );
-            await logger.info("extract completed", {
-              chatId,
-              runId: extraction.runId,
-              site: extraction.site,
-              crawledPages: extraction.result.crawledPages,
-              durationMs: Date.now() - extractStartedAt,
-            });
             continue;
           }
 

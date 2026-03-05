@@ -16,6 +16,10 @@ Proyek ini fokus ke:
 - 🍪 **Cookie Management**: import cookies Netscape/JSON ke `.env`
 - 🧪 **Quality Gate Cepat**: `tsgo` + `oxlint` + `oxfmt`
 - 🤖 **Telegram Bot**: command interaktif untuk extract/subtitle/runs/settings
+- 🧵 **Queue per Chat + Cancel**: job berat diproses berurutan per chat
+- ⚡ **Extract Cache**: request URL yang sama bisa dilayani dari cache runtime
+- 🚦 **Rate Limit User**: mencegah spam command agar bot tetap stabil
+- 🧹 **Remote Cleanup**: bersihkan cache/chat/output langsung dari Telegram
 - 🛡️ **Fallback Browser Playwright**: bantu bypass halaman challenge/CAPTCHA (dengan cookie valid)
 
 ## 🧱 Arsitektur Singkat
@@ -140,11 +144,18 @@ bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
 - `/ytdlp <status|version|update>` → status/update binary `yt-dlp`
 - `/cookieimport <domain>` → import cookie dari file upload
 - `/cookieset <domain> <cookie-header>` → set cookie manual
+- `/cancel` → batalkan job aktif (best effort) + hapus antrian chat
+- `/stats` → status runtime (queue/cache/memory/rate-limit)
+- `/clearcache` → bersihkan cache runtime bot
+- `/cleanoutput <all|site>` → hapus output untuk semua site / site tertentu
+- `/cleandownloads <all|site>` → hapus folder subtitle/download hasil
+- `/clearchat [limit]` → hapus message chat (best effort, default 20)
 
 Tip:
 
 - Kirim URL langsung tanpa command untuk extract 1 halaman.
 - Upload `cookies.txt` tanpa command untuk auto-import multi domain.
+- Command `clean*` bersifat destruktif. Gunakan dengan hati-hati.
 
 ## 🔐 Konfigurasi Environment
 
@@ -161,6 +172,15 @@ Tip:
 | `EXTRACT_OUTPUT_ROOT`        | `output` | Root folder output                          |
 | `EXTRACT_ENV_PATH`           | `.env`   | Path file env untuk bot                     |
 | `EXTRACT_SUBTITLE_TIMESTAMP` | `1`      | Sertakan timestamp subtitle (`0` untuk off) |
+
+### 🤖 Queue, Cache, Rate Limit (Bot)
+
+| Variable                              | Default    | Fungsi                           |
+| ------------------------------------- | ---------- | -------------------------------- |
+| `EXTRACT_BOT_CACHE_TTL_MS`            | `21600000` | TTL cache extract bot (6 jam)    |
+| `EXTRACT_BOT_CACHE_MAX_ENTRIES`       | `200`      | Maks entry cache extract runtime |
+| `EXTRACT_BOT_RATE_LIMIT_WINDOW_MS`    | `60000`    | Window rate limit per user       |
+| `EXTRACT_BOT_RATE_LIMIT_MAX_REQUESTS` | `8`        | Maks request per user per window |
 
 ### Cookie & anti-bot
 
@@ -220,10 +240,15 @@ output/
 
 - 🚦 Pembatasan antrean link crawler agar tidak menumpuk URL berlebih
 - 🪶 Response extract bisa mode ringan (`pages` tidak dibawa ke caller)
+- 🧵 Queue job per chat agar job berat tidak saling tabrak
+- 🛑 Cancel job (best effort) + clear antrian per chat lewat `/cancel`
+- ⚡ Cache hasil extract per URL/maxPages (TTL configurable)
+- 🚧 Rate limit per user untuk menahan spam request
 - 🧹 Cleanup sesi subtitle + batas maksimum sesi aktif
 - 🧾 Batas capture output `yt-dlp` supaya buffer stdout/stderr tidak membengkak
 - 📄 Reuse browser/page Playwright saat export PDF Scribd batch
 - 🗃️ Retensi manifest/history agar ukuran data jangka panjang tetap terkontrol
+- 🧼 Cleanup operasional dari Telegram: cache, downloads, output, chat
 
 ## 🧪 Quality Gate (Wajib)
 

@@ -5,6 +5,8 @@ const DEFAULT_RUNS_LIMIT = 5;
 const MAX_RUNS_LIMIT = 20;
 const DEFAULT_EXTRACT_MAX_PAGES = 1;
 const MAX_EXTRACT_MAX_PAGES = 30;
+const DEFAULT_CLEAR_CHAT_LIMIT = 20;
+const MAX_CLEAR_CHAT_LIMIT = 100;
 
 export type TelegramCommand =
   | { kind: "help" }
@@ -17,6 +19,12 @@ export type TelegramCommand =
   | { kind: "ytDlp"; action: "version" | "update" | "status" }
   | { kind: "cookieImport"; domain: string }
   | { kind: "cookieSet"; domain: string; cookie: string }
+  | { kind: "cancel" }
+  | { kind: "stats" }
+  | { kind: "clearCache" }
+  | { kind: "clearChat"; limit: number }
+  | { kind: "cleanOutput"; scope: "all" | "site"; site?: string }
+  | { kind: "cleanDownloads"; scope: "all" | "site"; site?: string }
   | { kind: "unknown" };
 
 function toBoundedPositiveInt(
@@ -217,6 +225,45 @@ export function parseTelegramCommand(text: string): TelegramCommand {
       domain,
       cookie,
     };
+  }
+
+  if (command === "/cancel") {
+    return { kind: "cancel" };
+  }
+
+  if (command === "/stats") {
+    return { kind: "stats" };
+  }
+
+  if (command === "/clearcache") {
+    return { kind: "clearCache" };
+  }
+
+  if (command === "/clearchat") {
+    return {
+      kind: "clearChat",
+      limit: toBoundedPositiveInt(
+        parts[1],
+        DEFAULT_CLEAR_CHAT_LIMIT,
+        MAX_CLEAR_CHAT_LIMIT,
+      ),
+    };
+  }
+
+  if (command === "/cleanoutput" || command === "/cleandownloads") {
+    const scopeRaw = parts[1]?.trim().toLowerCase();
+
+    if (!scopeRaw) {
+      return { kind: "unknown" };
+    }
+
+    const isAll = scopeRaw === "all";
+    const scope = isAll ? "all" : "site";
+    const site = isAll ? undefined : scopeRaw;
+    if (command === "/cleanoutput") {
+      return { kind: "cleanOutput", scope, site };
+    }
+    return { kind: "cleanDownloads", scope, site };
   }
 
   if (isUrl(trimmed)) {

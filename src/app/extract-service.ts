@@ -33,6 +33,7 @@ export type ExtractionProgress = {
 export type ExtractOptions = {
   onProgress?: (progress: ExtractionProgress) => Promise<void> | void;
   includePagesInResponse?: boolean;
+  shouldCancel?: () => boolean;
 };
 
 export type ExtractResponse = {
@@ -287,6 +288,11 @@ export async function runExtraction(
   options?: ExtractOptions,
 ): Promise<ExtractResponse> {
   const includePagesInResponse = options?.includePagesInResponse ?? true;
+  const throwIfCancelled = (): void => {
+    if (options?.shouldCancel?.()) {
+      throw new Error("Extraction cancelled by user");
+    }
+  };
   const report = async (step: string, message: string): Promise<void> => {
     try {
       await options?.onProgress?.({ step, message });
@@ -296,12 +302,14 @@ export async function runExtraction(
   };
 
   await report("init", "Menyiapkan proses extract");
+  throwIfCancelled();
   const runId = buildRunId();
   const site = buildSiteFolderName(request.rootUrl);
   const startedAt = Date.now();
 
   await report("crawl", "Mengambil dan memproses konten halaman");
   const result = await crawlCheerioDocs(request.rootUrl, request.maxPages, {
+    shouldCancel: options?.shouldCancel,
     onProgress: async (progress) => {
       const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
       await report(
@@ -310,11 +318,13 @@ export async function runExtraction(
       );
     },
   });
+  throwIfCancelled();
   const siteRoot = `${request.outputRoot}/sites/${site}`;
   await mkdir(siteRoot, { recursive: true });
 
   await report("files", "Menyusun file Markdown dan Text");
   const output = await writePageOutputs(result, request.outputRoot, site);
+  throwIfCancelled();
   const resultFile = `${siteRoot}/last-extract.json`;
   const historyRoot = `${siteRoot}/history`;
   await mkdir(historyRoot, { recursive: true });
@@ -355,6 +365,7 @@ export async function runExtraction(
   await writeSiteManifest(request.outputRoot, site, sortedSite);
   await writeManifest(request.outputRoot, sortedGlobal);
   await report("done", "Extract selesai");
+  throwIfCancelled();
 
   if (!includePagesInResponse) {
     result.pages = [];

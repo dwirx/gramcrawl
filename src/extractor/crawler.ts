@@ -22,6 +22,7 @@ export type CrawlProgress = {
 
 export type CrawlOptions = {
   onProgress?: (progress: CrawlProgress) => Promise<void> | void;
+  shouldCancel?: () => boolean;
 };
 
 const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com"];
@@ -237,6 +238,10 @@ export async function crawlCheerioDocs(
   const pages: ExtractedPage[] = [];
 
   while (queue.length > 0 && pages.length < maxPages) {
+    if (options?.shouldCancel?.()) {
+      throw new Error("Extraction cancelled by user");
+    }
+
     const currentUrl = queue.shift();
 
     if (!currentUrl || visited.has(currentUrl)) {
@@ -255,6 +260,9 @@ export async function crawlCheerioDocs(
     });
 
     try {
+      if (options?.shouldCancel?.()) {
+        throw new Error("Extraction cancelled by user");
+      }
       const html = await fetchHtml(currentUrl);
       let extracted: ExtractedPage | null = null;
       const forceBrowser =
@@ -383,6 +391,9 @@ export async function crawlCheerioDocs(
 
       let scannedLinks = 0;
       for (const link of extracted.links) {
+        if (options?.shouldCancel?.()) {
+          break;
+        }
         if (
           scannedLinks >= MAX_LINKS_SCANNED_PER_PAGE ||
           queue.length >= queueLimit

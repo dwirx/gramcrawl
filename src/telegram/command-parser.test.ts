@@ -272,4 +272,68 @@ describe("parseTelegramCommand", () => {
     expect(parsed.domain).toBe("projectmultatuli.org");
     expect(parsed.cookie).toBe("cf_clearance=abc; __cf_bm=def");
   });
+
+  test("parses /cancel command", () => {
+    const parsed = parseTelegramCommand("/cancel");
+
+    expect(parsed.kind).toBe("cancel");
+  });
+
+  test("parses /stats command", () => {
+    const parsed = parseTelegramCommand("/stats");
+
+    expect(parsed.kind).toBe("stats");
+  });
+
+  test("parses /clearcache command", () => {
+    const parsed = parseTelegramCommand("/clearcache");
+
+    expect(parsed.kind).toBe("clearCache");
+  });
+
+  test("parses /clearchat with bounded limit", () => {
+    const parsed = parseTelegramCommand("/clearchat 200");
+
+    expect(parsed.kind).toBe("clearChat");
+    if (parsed.kind !== "clearChat") {
+      throw new Error("Expected clearChat command");
+    }
+
+    expect(parsed.limit).toBe(100);
+  });
+
+  test("parses /cleanoutput all", () => {
+    const parsed = parseTelegramCommand("/cleanoutput all");
+
+    expect(parsed.kind).toBe("cleanOutput");
+    if (parsed.kind !== "cleanOutput") {
+      throw new Error("Expected cleanOutput command");
+    }
+
+    expect(parsed.scope).toBe("all");
+  });
+
+  test("parses /cleanoutput by site", () => {
+    const parsed = parseTelegramCommand("/cleanoutput example.com");
+
+    expect(parsed.kind).toBe("cleanOutput");
+    if (parsed.kind !== "cleanOutput") {
+      throw new Error("Expected cleanOutput command");
+    }
+
+    expect(parsed.scope).toBe("site");
+    expect(parsed.site).toBe("example.com");
+  });
+
+  test("parses /cleandownloads by site", () => {
+    const parsed = parseTelegramCommand("/cleandownloads example.com");
+
+    expect(parsed.kind).toBe("cleanDownloads");
+    if (parsed.kind !== "cleanDownloads") {
+      throw new Error("Expected cleanDownloads command");
+    }
+
+    expect(parsed.scope).toBe("site");
+    expect(parsed.site).toBe("example.com");
+  });
 });
