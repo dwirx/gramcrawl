@@ -104,6 +104,28 @@ describe("parseTelegramCommand", () => {
     expect(parsed.limit).toBe(5);
   });
 
+  test("parses /runs with bot mention", () => {
+    const parsed = parseTelegramCommand("/runs@teleextract_bot 7");
+
+    expect(parsed.kind).toBe("runs");
+    if (parsed.kind !== "runs") {
+      throw new Error("Expected runs command");
+    }
+
+    expect(parsed.limit).toBe(7);
+  });
+
+  test("caps /runs limit to prevent oversized responses", () => {
+    const parsed = parseTelegramCommand("/runs 9999");
+
+    expect(parsed.kind).toBe("runs");
+    if (parsed.kind !== "runs") {
+      throw new Error("Expected runs command");
+    }
+
+    expect(parsed.limit).toBe(20);
+  });
+
   test("parses /menu alias as help command", () => {
     const parsed = parseTelegramCommand("/menu");
 
@@ -140,6 +162,42 @@ describe("parseTelegramCommand", () => {
     expect(parsed.maxPages).toBe(1);
   });
 
+  test("caps /extract maxPages for safety", () => {
+    const parsed = parseTelegramCommand(
+      "/extract https://example.com/article 999",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.maxPages).toBe(30);
+  });
+
+  test("parses command names case-insensitively", () => {
+    const parsed = parseTelegramCommand(
+      "/EXTRACT https://example.com/article 2",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.maxPages).toBe(2);
+  });
+
+  test("does not treat command prefixes as valid commands", () => {
+    expect(parseTelegramCommand("/runs123 9").kind).toBe("unknown");
+    expect(parseTelegramCommand("/extractor https://example.com").kind).toBe(
+      "unknown",
+    );
+    expect(
+      parseTelegramCommand("/subtitlex https://youtube.com/watch?v=1").kind,
+    ).toBe("unknown");
+  });
+
   test("parses /cookieimport command", () => {
     const parsed = parseTelegramCommand("/cookieimport projectmultatuli.org");
 
@@ -160,6 +218,45 @@ describe("parseTelegramCommand", () => {
     }
 
     expect(parsed.action).toBe("on");
+  });
+
+  test("parses /ytdlp with default status action", () => {
+    const parsed = parseTelegramCommand("/ytdlp");
+
+    expect(parsed.kind).toBe("ytDlp");
+    if (parsed.kind !== "ytDlp") {
+      throw new Error("Expected ytDlp command");
+    }
+
+    expect(parsed.action).toBe("status");
+  });
+
+  test("parses /ytdlp version action", () => {
+    const parsed = parseTelegramCommand("/ytdlp version");
+
+    expect(parsed.kind).toBe("ytDlp");
+    if (parsed.kind !== "ytDlp") {
+      throw new Error("Expected ytDlp command");
+    }
+
+    expect(parsed.action).toBe("version");
+  });
+
+  test("parses /ytdlp update action with bot mention", () => {
+    const parsed = parseTelegramCommand("/ytdlp@teleextract_bot update");
+
+    expect(parsed.kind).toBe("ytDlp");
+    if (parsed.kind !== "ytDlp") {
+      throw new Error("Expected ytDlp command");
+    }
+
+    expect(parsed.action).toBe("update");
+  });
+
+  test("rejects invalid /ytdlp action", () => {
+    const parsed = parseTelegramCommand("/ytdlp force");
+
+    expect(parsed.kind).toBe("unknown");
   });
 
   test("parses /cookieset command", () => {

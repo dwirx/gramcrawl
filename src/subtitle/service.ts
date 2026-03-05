@@ -31,6 +31,19 @@ export type SubtitleRenderOptions = {
   includeTimestamp?: boolean;
 };
 
+export type YtDlpStatus = {
+  binary: string;
+  version: string;
+  mode: "managed-local" | "configured" | "path";
+  autoUpdateEnabled: boolean;
+};
+
+export type YtDlpUpdateResult = {
+  before: YtDlpStatus;
+  after: YtDlpStatus;
+  method: "download-latest" | "self-update";
+};
+
 type YtDlpMetadata = {
   title?: string;
   webpage_url?: string;
@@ -58,8 +71,10 @@ const YT_DLP_RELEASE_URL =
     : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
 const YT_DLP_META_PATH = `${YT_DLP_LOCAL_DIR}/yt-dlp.meta.json`;
 const YT_DLP_AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const YT_DLP_UPDATE_TIMEOUT_MS = 120_000;
 
 let ytDlpInstallPromise: Promise<string> | null = null;
+let ytDlpUpdatePromise: Promise<YtDlpUpdateResult> | null = null;
 
 type SubtitleCue = {
   start: string;
@@ -439,7 +454,7 @@ async function installLocalYtDlpBinary(): Promise<string> {
 }
 
 async function shouldAutoUpdateLocalYtDlp(): Promise<boolean> {
-  if ((process.env.EXTRACT_YT_DLP_AUTO_UPDATE ?? "1").trim() === "0") {
+  if (!isYtDlpAutoUpdateEnabled()) {
     return false;
   }
 
@@ -460,6 +475,56 @@ async function shouldAutoUpdateLocalYtDlp(): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+function isYtDlpAutoUpdateEnabled(): boolean {
+  return (process.env.EXTRACT_YT_DLP_AUTO_UPDATE ?? "1").trim() !== "0";
+}
+
+function normalizeBinaryPath(pathValue: string): string {
+  return pathValue.replaceAll("\\", "/").replaceAll(/\/+/g, "/");
+}
+
+function isManagedLocalYtDlpBinary(binary: string): boolean {
+  const normalizedBinary = normalizeBinaryPath(binary);
+  const normalizedLocal = normalizeBinaryPath(YT_DLP_LOCAL_BINARY);
+  return (
+    normalizedBinary === normalizedLocal ||
+    normalizedBinary.endsWith(`/${normalizedLocal}`)
+  );
+}
+
+function detectYtDlpMode(binary: string): YtDlpStatus["mode"] {
+  if (isManagedLocalYtDlpBinary(binary)) {
+    return "managed-local";
+  }
+
+  if (process.env.EXTRACT_YT_DLP_BIN?.trim()) {
+    return "configured";
+  }
+
+  return "path";
+}
+
+async function readYtDlpVersion(binary: string): Promise<string> {
+  const result = await runYtDlpWithBinary(
+    binary,
+    ["--version"],
+    YT_DLP_CHECK_TIMEOUT_MS,
+  );
+
+  if (result.code !== 0) {
+    throw new Error(
+      `Gagal membaca versi yt-dlp: ${result.stderr || result.stdout}`,
+    );
+  }
+
+  const version = result.stdout.trim().split(/\s+/)[0]?.trim();
+  if (!version) {
+    throw new Error("Output versi yt-dlp kosong");
+  }
+
+  return version;
 }
 
 async function ensureLocalYtDlpBinary(): Promise<string> {
@@ -503,6 +568,56 @@ async function resolveYtDlpBinary(): Promise<string> {
 
 export async function ensureYtDlpReady(): Promise<string> {
   return resolveYtDlpBinary();
+}
+
+export async function getYtDlpStatus(): Promise<YtDlpStatus> {
+  const binary = await resolveYtDlpBinary();
+  const version = await readYtDlpVersion(binary);
+
+  return {
+    binary,
+    version,
+    mode: detectYtDlpMode(binary),
+    autoUpdateEnabled: isYtDlpAutoUpdateEnabled(),
+  };
+}
+
+async function updateYtDlpBinaryInternal(): Promise<YtDlpUpdateResult> {
+  const before = await getYtDlpStatus();
+  const canManageLocal =
+    before.mode === "managed-local" || before.mode === "path";
+
+  if (canManageLocal) {
+    await ensureLocalYtDlpBinary();
+  } else {
+    const update = await runYtDlpWithBinary(
+      before.binary,
+      ["-U"],
+      YT_DLP_UPDATE_TIMEOUT_MS,
+    );
+    if (update.code !== 0) {
+      throw new Error(
+        `Gagal update yt-dlp via self-update: ${update.stderr || update.stdout}`,
+      );
+    }
+  }
+
+  const after = await getYtDlpStatus();
+  return {
+    before,
+    after,
+    method: canManageLocal ? "download-latest" : "self-update",
+  };
+}
+
+export async function updateYtDlpBinary(): Promise<YtDlpUpdateResult> {
+  if (!ytDlpUpdatePromise) {
+    ytDlpUpdatePromise = updateYtDlpBinaryInternal().finally(() => {
+      ytDlpUpdatePromise = null;
+    });
+  }
+
+  return ytDlpUpdatePromise;
 }
 
 async function runYtDlp(

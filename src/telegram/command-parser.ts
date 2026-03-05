@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 const UrlSchema = z.url();
+const DEFAULT_RUNS_LIMIT = 5;
+const MAX_RUNS_LIMIT = 20;
+const DEFAULT_EXTRACT_MAX_PAGES = 1;
+const MAX_EXTRACT_MAX_PAGES = 30;
 
 export type TelegramCommand =
   | { kind: "help" }
@@ -10,11 +14,16 @@ export type TelegramCommand =
   | { kind: "subtitle"; url: string }
   | { kind: "subtitleTimestamp"; action: "on" | "off" | "status" }
   | { kind: "browserMode"; action: "on" | "off" | "status" }
+  | { kind: "ytDlp"; action: "version" | "update" | "status" }
   | { kind: "cookieImport"; domain: string }
   | { kind: "cookieSet"; domain: string; cookie: string }
   | { kind: "unknown" };
 
-function toInt(input: string | undefined, fallback: number): number {
+function toBoundedPositiveInt(
+  input: string | undefined,
+  fallback: number,
+  max: number,
+): number {
   if (!input) {
     return fallback;
   }
@@ -25,7 +34,7 @@ function toInt(input: string | undefined, fallback: number): number {
     return fallback;
   }
 
-  return parsed;
+  return Math.min(parsed, max);
 }
 
 function isUrl(value: string): boolean {
@@ -63,26 +72,25 @@ function normalizeCommandText(input: string): string {
 
 export function parseTelegramCommand(text: string): TelegramCommand {
   const trimmed = normalizeCommandText(text);
-
-  if (
-    !trimmed ||
-    trimmed === "/start" ||
-    trimmed === "/help" ||
-    trimmed === "/menu"
-  ) {
+  if (!trimmed) {
     return { kind: "help" };
   }
 
-  if (trimmed.startsWith("/runs")) {
-    const parts = trimmed.split(/\s+/);
+  const parts = trimmed.split(/\s+/);
+  const command = parts[0]?.toLowerCase() ?? "";
+
+  if (command === "/start" || command === "/help" || command === "/menu") {
+    return { kind: "help" };
+  }
+
+  if (command === "/runs") {
     return {
       kind: "runs",
-      limit: toInt(parts[1], 5),
+      limit: toBoundedPositiveInt(parts[1], DEFAULT_RUNS_LIMIT, MAX_RUNS_LIMIT),
     };
   }
 
-  if (trimmed.startsWith("/extract")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/extract") {
     const url = parts[1];
 
     if (!url || !isUrl(url)) {
@@ -92,12 +100,15 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     return {
       kind: "extract",
       url,
-      maxPages: toInt(parts[2], 1),
+      maxPages: toBoundedPositiveInt(
+        parts[2],
+        DEFAULT_EXTRACT_MAX_PAGES,
+        MAX_EXTRACT_MAX_PAGES,
+      ),
     };
   }
 
-  if (trimmed.startsWith("/scribd")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/scribd") {
     const url = parts[1];
 
     if (!url || !isScribdUrl(url)) {
@@ -107,16 +118,15 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     return {
       kind: "extract",
       url,
-      maxPages: 1,
+      maxPages: DEFAULT_EXTRACT_MAX_PAGES,
     };
   }
 
   if (
-    trimmed.startsWith("/subtitletimestamp") ||
-    trimmed.startsWith("/subtitlets") ||
-    trimmed.startsWith("/timestamp")
+    command === "/subtitletimestamp" ||
+    command === "/subtitlets" ||
+    command === "/timestamp"
   ) {
-    const parts = trimmed.split(/\s+/);
     const action = (parts[1] ?? "status").toLowerCase();
 
     if (action === "on" || action === "off" || action === "status") {
@@ -129,8 +139,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     return { kind: "unknown" };
   }
 
-  if (trimmed.startsWith("/subtitle")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/subtitle") {
     const url = parts[1];
 
     if (!url || !isUrl(url)) {
@@ -143,8 +152,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (trimmed.startsWith("/mark") || trimmed.startsWith("/md")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/mark" || command === "/md") {
     const url = parts[1];
 
     if (!url || !isUrl(url)) {
@@ -157,8 +165,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (trimmed.startsWith("/browser")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/browser") {
     const action = (parts[1] ?? "status").toLowerCase();
 
     if (action === "on" || action === "off" || action === "status") {
@@ -171,8 +178,20 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     return { kind: "unknown" };
   }
 
-  if (trimmed.startsWith("/cookieimport")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/ytdlp") {
+    const action = (parts[1] ?? "status").toLowerCase();
+
+    if (action === "version" || action === "update" || action === "status") {
+      return {
+        kind: "ytDlp",
+        action,
+      };
+    }
+
+    return { kind: "unknown" };
+  }
+
+  if (command === "/cookieimport") {
     const domain = parts[1]?.trim();
 
     if (!domain) {
@@ -185,8 +204,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (trimmed.startsWith("/cookieset")) {
-    const parts = trimmed.split(/\s+/);
+  if (command === "/cookieset") {
     const domain = parts[1]?.trim();
     const cookie = parts.slice(2).join(" ").trim();
 

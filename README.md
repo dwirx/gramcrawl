@@ -118,6 +118,7 @@ Catatan:
 Command Telegram bot:
 
 - `/extract <url> [maxPages]`
+- `/ytdlp <status|version|update>`
 - `/browser <on|off|status>`
 - upload `cookies.txt` langsung (tanpa command) untuk auto import domain dari file
 - `/cookieimport <domain>` (kirim file `cookies.txt` dan pakai command ini di caption)

@@ -9,10 +9,12 @@ import {
 } from "../cli/cookie-env";
 import {
   downloadSubtitlesAndConvert,
+  getYtDlpStatus,
   listAvailableSubtitles,
   pickPreferredSubtitleLanguages,
   resolveOriginalLanguage,
   type SubtitleLanguage,
+  updateYtDlpBinary,
 } from "../subtitle/service";
 import { extractWithMarkdownNew } from "../mark/service";
 import { parseTelegramCommand } from "./command-parser";
@@ -289,7 +291,7 @@ function buildHelpMessage(): string {
     "",
     "Perintah utama:",
     "• /extract <url> [maxPages]",
-    "  Ekstrak website ke JSON + Markdown + TXT.",
+    "  Ekstrak website ke JSON + Markdown + TXT (maxPages 1-30).",
     "• /scribd <url-scribd>",
     "  Shortcut extract 1 halaman khusus Scribd.",
     "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
@@ -300,7 +302,9 @@ function buildHelpMessage(): string {
     "• /md <url>",
     "  Alias cepat dari /mark.",
     "• /runs [limit]",
-    "  Lihat riwayat extract terbaru.",
+    "  Lihat riwayat extract terbaru (limit 1-20).",
+    "• /ytdlp <status|version|update>",
+    "  Cek versi yt-dlp atau update manual lewat bot.",
     "",
     "Pengaturan:",
     "• /subtitletimestamp <on|off|status>",
@@ -344,6 +348,10 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
       description: "Alias /mark: /md <url>",
     },
     { command: "runs", description: "Lihat riwayat extract terbaru" },
+    {
+      command: "ytdlp",
+      description: "Status/versi/update yt-dlp: status|version|update",
+    },
     {
       command: "browser",
       description: "Status/ubah browser fallback: on|off|status",
@@ -401,6 +409,24 @@ function modeEnvValue(enabled: boolean): "1" | "0" {
   return enabled ? "1" : "0";
 }
 
+function ytDlpModeLabel(mode: "managed-local" | "configured" | "path"): string {
+  if (mode === "managed-local") {
+    return "Managed local (.cache/bin)";
+  }
+  if (mode === "configured") {
+    return "Custom (EXTRACT_YT_DLP_BIN)";
+  }
+  return "PATH system";
+}
+
+function ytDlpUpdateMethodLabel(
+  method: "download-latest" | "self-update",
+): string {
+  return method === "download-latest"
+    ? "Download latest release"
+    : "Self update (-U)";
+}
+
 function buildUnknownCommandMessage(input: string): string {
   return [
     "Perintah tidak dikenali.",
@@ -413,6 +439,8 @@ function buildUnknownCommandMessage(input: string): string {
     "• /mark https://si.inc/posts/fdm1/",
     "• /md https://si.inc/posts/fdm1/",
     "• /runs 5",
+    "• /ytdlp status",
+    "• /ytdlp update",
     "",
     "Ketik /help atau /menu untuk daftar perintah lengkap.",
   ].join("\n");
@@ -550,10 +578,14 @@ function parseSubtitleCallbackData(
     return null;
   }
 
-  return {
-    sessionId,
-    language: decodeURIComponent(encodedLanguage),
-  };
+  try {
+    return {
+      sessionId,
+      language: decodeURIComponent(encodedLanguage),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function buildRunsMessage(
@@ -1382,71 +1414,91 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 { label: "URL", value: command.url },
               ]),
             );
-            const listed = await listAvailableSubtitles(command.url);
-            const resolvedOriginal = resolveOriginalLanguage(
-              listed.languages,
-              listed.originalLanguage,
-            );
-            const preferred = pickPreferredSubtitleLanguages(
-              listed.languages,
-              resolvedOriginal,
-            );
+            try {
+              const listed = await listAvailableSubtitles(command.url);
+              const resolvedOriginal = resolveOriginalLanguage(
+                listed.languages,
+                listed.originalLanguage,
+              );
+              const preferred = pickPreferredSubtitleLanguages(
+                listed.languages,
+                resolvedOriginal,
+              );
 
-            if (preferred.length === 0) {
+              if (preferred.length === 0) {
+                await api.editMessage(
+                  chatId,
+                  statusMessageId,
+                  buildStatusCard("❌ Subtitle tidak tersedia", [
+                    { label: "Judul", value: listed.title },
+                    { label: "URL", value: listed.webpageUrl },
+                  ]),
+                );
+                continue;
+              }
+
+              const sessionId = createSubtitleSessionId();
+              subtitleSessions.set(sessionId, {
+                chatId,
+                url: command.url,
+                title: listed.title,
+                languages: new Set(preferred.map((item) => item.code)),
+                createdAt: Date.now(),
+              });
+
+              const keyboard = buildSubtitleKeyboard(sessionId, preferred);
               await api.editMessage(
                 chatId,
                 statusMessageId,
-                buildStatusCard("❌ Subtitle tidak tersedia", [
-                  { label: "Judul", value: listed.title },
-                  { label: "URL", value: listed.webpageUrl },
+                [
+                  buildStatusCard("✅ [2/2] Subtitle ditemukan", [
+                    { label: "Judul", value: listed.title },
+                    { label: "Extractor", value: listed.extractorKey },
+                    {
+                      label: "Bahasa original",
+                      value: resolvedOriginal ?? "-",
+                    },
+                    { label: "Bahasa ditampilkan", value: preferred.length },
+                    {
+                      label: "Timestamp saat ini",
+                      value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
+                    },
+                  ]),
+                  "",
+                  "Bahasa pilihan (original/en/id):",
+                  renderSubtitleLanguageList(preferred),
+                  "",
+                  "Bahasa YouTube tersedia:",
+                  renderAllYoutubeLanguages(listed.languages),
+                  "",
+                  "Keterangan tombol: [M]=manual, [A]=auto",
+                  "Pilih bahasa subtitle dari tombol di bawah.",
+                ].join("\n"),
+              );
+              await api.sendMessage(chatId, "Pilih bahasa subtitle:", keyboard);
+
+              await logger.info("subtitle listed", {
+                chatId,
+                title: listed.title,
+                url: listed.webpageUrl,
+                languages: listed.languages.length,
+              });
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard("❌ Gagal mengecek subtitle", [
+                  { label: "URL", value: command.url },
+                  { label: "Detail", value: detail.slice(0, 350) },
                 ]),
               );
-              continue;
+              await logger.error("subtitle list failed", error, {
+                chatId,
+                url: command.url,
+              });
             }
-
-            const sessionId = createSubtitleSessionId();
-            subtitleSessions.set(sessionId, {
-              chatId,
-              url: command.url,
-              title: listed.title,
-              languages: new Set(preferred.map((item) => item.code)),
-              createdAt: Date.now(),
-            });
-
-            const keyboard = buildSubtitleKeyboard(sessionId, preferred);
-            await api.editMessage(
-              chatId,
-              statusMessageId,
-              [
-                buildStatusCard("✅ [2/2] Subtitle ditemukan", [
-                  { label: "Judul", value: listed.title },
-                  { label: "Extractor", value: listed.extractorKey },
-                  { label: "Bahasa original", value: resolvedOriginal ?? "-" },
-                  { label: "Bahasa ditampilkan", value: preferred.length },
-                  {
-                    label: "Timestamp saat ini",
-                    value: isSubtitleTimestampEnabled() ? "ON" : "OFF",
-                  },
-                ]),
-                "",
-                "Bahasa pilihan (original/en/id):",
-                renderSubtitleLanguageList(preferred),
-                "",
-                "Bahasa YouTube tersedia:",
-                renderAllYoutubeLanguages(listed.languages),
-                "",
-                "Keterangan tombol: [M]=manual, [A]=auto",
-                "Pilih bahasa subtitle dari tombol di bawah.",
-              ].join("\n"),
-            );
-            await api.sendMessage(chatId, "Pilih bahasa subtitle:", keyboard);
-
-            await logger.info("subtitle listed", {
-              chatId,
-              title: listed.title,
-              url: listed.webpageUrl,
-              languages: listed.languages.length,
-            });
             continue;
           }
 
@@ -1557,6 +1609,99 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               action: command.action,
               envPath: config.envPath,
             });
+            continue;
+          }
+
+          if (command.kind === "ytDlp") {
+            await api.sendChatAction(chatId, "typing");
+            const statusMessageId = await api.sendMessage(
+              chatId,
+              buildStatusCard(
+                command.action === "update"
+                  ? "⏳ [1/2] Menyiapkan update yt-dlp"
+                  : "⏳ [1/1] Mengecek yt-dlp",
+                [{ label: "Aksi", value: command.action }],
+              ),
+            );
+
+            try {
+              if (command.action === "update") {
+                const updated = await updateYtDlpBinary();
+
+                await api.editMessage(
+                  chatId,
+                  statusMessageId,
+                  buildStatusCard("✅ [2/2] yt-dlp berhasil diupdate", [
+                    {
+                      label: "Metode",
+                      value: ytDlpUpdateMethodLabel(updated.method),
+                    },
+                    { label: "Versi sebelum", value: updated.before.version },
+                    { label: "Versi sesudah", value: updated.after.version },
+                    {
+                      label: "Mode binary",
+                      value: ytDlpModeLabel(updated.after.mode),
+                    },
+                    {
+                      label: "Auto update",
+                      value: updated.after.autoUpdateEnabled ? "ON" : "OFF",
+                    },
+                    { label: "Binary", value: updated.after.binary },
+                  ]),
+                );
+
+                await logger.info("yt-dlp updated", {
+                  chatId,
+                  beforeVersion: updated.before.version,
+                  afterVersion: updated.after.version,
+                  method: updated.method,
+                  binary: updated.after.binary,
+                });
+                continue;
+              }
+
+              const status = await getYtDlpStatus();
+              const title =
+                command.action === "version"
+                  ? "✅ Versi yt-dlp"
+                  : "✅ Status yt-dlp";
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard(title, [
+                  { label: "Versi", value: status.version },
+                  { label: "Mode binary", value: ytDlpModeLabel(status.mode) },
+                  {
+                    label: "Auto update",
+                    value: status.autoUpdateEnabled ? "ON" : "OFF",
+                  },
+                  { label: "Binary", value: status.binary },
+                ]),
+              );
+
+              await logger.info("yt-dlp status sent", {
+                chatId,
+                action: command.action,
+                version: status.version,
+                mode: status.mode,
+                binary: status.binary,
+              });
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard("❌ Operasi yt-dlp gagal", [
+                  { label: "Aksi", value: command.action },
+                  { label: "Detail", value: detail.slice(0, 350) },
+                ]),
+              );
+              await logger.error("yt-dlp command failed", error, {
+                chatId,
+                action: command.action,
+              });
+            }
             continue;
           }
 
