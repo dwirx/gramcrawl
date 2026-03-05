@@ -22,6 +22,7 @@ export type MarkExtractResult = {
 };
 
 const MARKDOWN_NEW_ENDPOINT = "https://markdown.new/";
+const DEFUDDLE_ENDPOINT = "https://defuddle.md/";
 const MARKDOWN_NEW_TIMEOUT_MS = 90_000;
 
 function normalizeWhitespace(value: string): string {
@@ -57,6 +58,46 @@ function resolveMarkMethod(): "auto" | "ai" | "browser" {
 
 function resolveRetainImages(): boolean {
   return (process.env.EXTRACT_MARK_RETAIN_IMAGES ?? "1").trim() !== "0";
+}
+
+export function buildArticleOutputFileNames(title: string): {
+  markdownFileName: string;
+  textFileName: string;
+  metaFileName: string;
+} {
+  const titleSlug = slugify(title);
+  return {
+    markdownFileName: `${titleSlug}.md`,
+    textFileName: `${titleSlug}.txt`,
+    metaFileName: `${titleSlug}.json`,
+  };
+}
+
+export function buildDefuddleFetchUrl(url: string): string {
+  const trimmed = url.trim();
+  const stripped = trimmed.replace(/^https?:\/\//i, "");
+  return `${DEFUDDLE_ENDPOINT}${stripped}`;
+}
+
+export function parseDefuddleTitleFromMarkdown(
+  markdown: string,
+): string | null {
+  const frontmatterMatch = markdown.match(
+    /^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/,
+  );
+  if (!frontmatterMatch?.[1]) {
+    return null;
+  }
+
+  const titleLine = frontmatterMatch[1].match(/^title:\s*(.+)$/im);
+  if (!titleLine?.[1]) {
+    return null;
+  }
+
+  const rawTitle = titleLine[1].trim();
+  const unquoted = rawTitle.replace(/^['"]|['"]$/g, "");
+  const normalized = normalizeWhitespace(unquoted);
+  return normalized || null;
 }
 
 async function fetchMarkdownFromMarkdownNew(url: string): Promise<{
@@ -121,21 +162,62 @@ async function fetchMarkdownFromMarkdownNew(url: string): Promise<{
   };
 }
 
-export async function extractWithMarkdownNew(
+async function fetchMarkdownFromDefuddle(url: string): Promise<{
+  title: string;
+  content: string;
+  method: string;
+  tokens: number | null;
+}> {
+  const endpoint = buildDefuddleFetchUrl(url);
+  const response = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      accept: "text/markdown, text/plain;q=0.9",
+    },
+    signal: AbortSignal.timeout(MARKDOWN_NEW_TIMEOUT_MS),
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `defuddle.md gagal (${response.status}): ${text.slice(0, 300)}`,
+    );
+  }
+
+  const parsedUrl = new URL(url);
+  const fallbackTitle = normalizeWhitespace(parsedUrl.hostname) || "Untitled";
+  const title = parseDefuddleTitleFromMarkdown(text) ?? fallbackTitle;
+
+  return {
+    title,
+    content: text,
+    method: "defuddle-md",
+    tokens: null,
+  };
+}
+
+async function writeMarkResultFiles(
   url: string,
   outputRoot: string,
+  fetched: {
+    title: string;
+    content: string;
+    method: string;
+    tokens: number | null;
+  },
+  outputVariant: string,
 ): Promise<MarkExtractResult> {
   const parsedUrl = new URL(url);
-  const fetched = await fetchMarkdownFromMarkdownNew(url);
   const site = parsedUrl.hostname.toLowerCase();
   const titleSlug = slugify(fetched.title);
   const timestamp = toTimestampSlug();
-  const outputDir = `${outputRoot}/sites/${site}/${titleSlug}/markdown-new/${timestamp}`;
+  const outputDir = `${outputRoot}/sites/${site}/${titleSlug}/${outputVariant}/${timestamp}`;
   await mkdir(outputDir, { recursive: true });
 
-  const markdownPath = `${outputDir}/${titleSlug}.mark.md`;
-  const textPath = `${outputDir}/${titleSlug}.mark.txt`;
-  const metaPath = `${outputDir}/${titleSlug}.mark.json`;
+  const names = buildArticleOutputFileNames(fetched.title);
+  const markdownPath = `${outputDir}/${names.markdownFileName}`;
+  const textPath = `${outputDir}/${names.textFileName}`;
+  const metaPath = `${outputDir}/${names.metaFileName}`;
 
   const normalizedContent = fetched.content.trimEnd();
   await Bun.write(markdownPath, `${normalizedContent}\n`);
@@ -165,4 +247,20 @@ export async function extractWithMarkdownNew(
     textPath,
     metaPath,
   };
+}
+
+export async function extractWithMarkdownNew(
+  url: string,
+  outputRoot: string,
+): Promise<MarkExtractResult> {
+  const fetched = await fetchMarkdownFromMarkdownNew(url);
+  return writeMarkResultFiles(url, outputRoot, fetched, "markdown-new");
+}
+
+export async function extractWithDefuddle(
+  url: string,
+  outputRoot: string,
+): Promise<MarkExtractResult> {
+  const fetched = await fetchMarkdownFromDefuddle(url);
+  return writeMarkResultFiles(url, outputRoot, fetched, "defuddle-md");
 }

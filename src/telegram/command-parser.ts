@@ -13,6 +13,7 @@ export type TelegramCommand =
   | { kind: "runs"; limit: number }
   | { kind: "extract"; url: string; maxPages: number }
   | { kind: "mark"; url: string }
+  | { kind: "defuddle"; url: string }
   | { kind: "subtitle"; url: string }
   | { kind: "subtitleTimestamp"; action: "on" | "off" | "status" }
   | { kind: "browserMode"; action: "on" | "off" | "status" }
@@ -169,6 +170,19 @@ export function parseTelegramCommand(text: string): TelegramCommand {
 
     return {
       kind: "mark",
+      url,
+    };
+  }
+
+  if (command === "/defuddle" || command === "/df") {
+    const url = parts[1];
+
+    if (!url || !isUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "defuddle",
       url,
     };
   }

@@ -51,6 +51,28 @@ describe("parseTelegramCommand", () => {
     expect(parsed.url).toBe("https://si.inc/posts/fdm1/");
   });
 
+  test("parses /defuddle command", () => {
+    const parsed = parseTelegramCommand("/defuddle https://si.inc/posts/fdm1/");
+
+    expect(parsed.kind).toBe("defuddle");
+    if (parsed.kind !== "defuddle") {
+      throw new Error("Expected defuddle command");
+    }
+
+    expect(parsed.url).toBe("https://si.inc/posts/fdm1/");
+  });
+
+  test("parses /df command as defuddle alias", () => {
+    const parsed = parseTelegramCommand("/df https://si.inc/posts/fdm1/");
+
+    expect(parsed.kind).toBe("defuddle");
+    if (parsed.kind !== "defuddle") {
+      throw new Error("Expected defuddle command");
+    }
+
+    expect(parsed.url).toBe("https://si.inc/posts/fdm1/");
+  });
+
   test("parses /scribd command as extract with maxPages=1", () => {
     const parsed = parseTelegramCommand(
       "/scribd https://www.scribd.com/document/123456789/sample",

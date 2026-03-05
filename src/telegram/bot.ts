@@ -23,7 +23,7 @@ import {
   type SubtitleLanguage,
   updateYtDlpBinary,
 } from "../subtitle/service";
-import { extractWithMarkdownNew } from "../mark/service";
+import { extractWithDefuddle, extractWithMarkdownNew } from "../mark/service";
 import { parseTelegramCommand } from "./command-parser";
 import { createLogger } from "./logger";
 import {
@@ -495,6 +495,10 @@ function buildHelpMessage(): string {
     "  Convert URL ke Markdown via markdown.new.",
     "• /md <url>",
     "  Alias cepat dari /mark.",
+    "• /defuddle <url>",
+    "  Convert URL ke Markdown via defuddle.md.",
+    "• /df <url>",
+    "  Alias cepat dari /defuddle.",
     "• /runs [limit]",
     "  Lihat riwayat extract terbaru (limit 1-20).",
     "• /ytdlp <status|version|update>",
@@ -552,6 +556,14 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "md",
       description: "Alias /mark: /md <url>",
+    },
+    {
+      command: "defuddle",
+      description: "Convert URL via defuddle.md: /defuddle <url>",
+    },
+    {
+      command: "df",
+      description: "Alias /defuddle: /df <url>",
     },
     { command: "runs", description: "Lihat riwayat extract terbaru" },
     {
@@ -668,6 +680,8 @@ function buildUnknownCommandMessage(input: string): string {
     "• /subtitle https://www.youtube.com/watch?v=xxxx",
     "• /mark https://si.inc/posts/fdm1/",
     "• /md https://si.inc/posts/fdm1/",
+    "• /defuddle https://si.inc/posts/fdm1/",
+    "• /df https://si.inc/posts/fdm1/",
     "• /runs 5",
     "• /ytdlp status",
     "• /ytdlp update",
@@ -2401,14 +2415,14 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     chatId,
                     marked.markdownPath,
                     "Markdown (.md)",
-                    "mark.md",
+                    buildSendFileName(marked.markdownPath, marked.title),
                   );
                   await api.sendChatAction(chatId, "upload_document");
                   await api.sendDocument(
                     chatId,
                     marked.textPath,
                     "Markdown mirror (.txt)",
-                    "mark.txt",
+                    buildSendFileName(marked.textPath, marked.title),
                   );
 
                   await api.editMessage(
@@ -2416,7 +2430,13 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     statusMessageId,
                     buildStatusCard("✅ [3/3] /mark selesai", [
                       { label: "Output", value: marked.outputDir },
-                      { label: "File", value: "mark.md + mark.txt" },
+                      {
+                        label: "File",
+                        value: [
+                          buildSendFileName(marked.markdownPath, marked.title),
+                          buildSendFileName(marked.textPath, marked.title),
+                        ].join(" + "),
+                      },
                     ]),
                   );
 
@@ -2454,6 +2474,120 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               await api.sendMessage(
                 chatId,
                 `⏳ Job /mark masuk antrian #${queuedMarkJob.position}.`,
+              );
+            }
+            continue;
+          }
+
+          if (command.kind === "defuddle") {
+            const queuedDefuddleJob = enqueueChatJob(
+              chatId,
+              `defuddle:${command.url}`,
+              async (cancelToken) => {
+                await api.sendChatAction(chatId, "typing");
+                const statusMessageId = await api.sendMessage(
+                  chatId,
+                  buildStatusCard("⏳ [1/3] Memproses /defuddle", [
+                    { label: "URL", value: command.url },
+                  ]),
+                );
+
+                try {
+                  const extracted = await extractWithDefuddle(
+                    command.url,
+                    config.outputRoot,
+                  );
+
+                  if (cancelToken.isCancelled()) {
+                    await api.editMessage(
+                      chatId,
+                      statusMessageId,
+                      "🛑 Job /defuddle dibatalkan.",
+                    );
+                    return;
+                  }
+
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("✅ [2/3] Defuddle berhasil dibuat", [
+                      { label: "Title", value: extracted.title },
+                      { label: "Method", value: extracted.method },
+                    ]),
+                  );
+
+                  await api.sendChatAction(chatId, "upload_document");
+                  await api.sendDocument(
+                    chatId,
+                    extracted.markdownPath,
+                    "Defuddle markdown (.md)",
+                    buildSendFileName(extracted.markdownPath, extracted.title),
+                  );
+                  await api.sendChatAction(chatId, "upload_document");
+                  await api.sendDocument(
+                    chatId,
+                    extracted.textPath,
+                    "Defuddle mirror (.txt)",
+                    buildSendFileName(extracted.textPath, extracted.title),
+                  );
+
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("✅ [3/3] /defuddle selesai", [
+                      { label: "Output", value: extracted.outputDir },
+                      {
+                        label: "File",
+                        value: [
+                          buildSendFileName(
+                            extracted.markdownPath,
+                            extracted.title,
+                          ),
+                          buildSendFileName(
+                            extracted.textPath,
+                            extracted.title,
+                          ),
+                        ].join(" + "),
+                      },
+                    ]),
+                  );
+
+                  await logger.info("defuddle completed", {
+                    chatId,
+                    url: command.url,
+                    title: extracted.title,
+                    method: extracted.method,
+                  });
+                } catch (error) {
+                  const detail =
+                    error instanceof Error ? error.message : String(error);
+                  await api.editMessage(
+                    chatId,
+                    statusMessageId,
+                    buildStatusCard("❌ /defuddle gagal", [
+                      { label: "Detail", value: detail.slice(0, 350) },
+                    ]),
+                  );
+                  await logger.error("defuddle failed", error, {
+                    chatId,
+                    url: command.url,
+                  });
+                }
+              },
+            );
+
+            if (queuedDefuddleJob.position < 0) {
+              await api.sendMessage(
+                chatId,
+                "Antrian /defuddle penuh. Coba lagi.",
+              );
+              continue;
+            }
+
+            if (!queuedDefuddleJob.started) {
+              await api.sendMessage(
+                chatId,
+                `⏳ Job /defuddle masuk antrian #${queuedDefuddleJob.position}.`,
               );
             }
             continue;
