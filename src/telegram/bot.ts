@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Page } from "playwright";
 import { runExtraction } from "../app/extract-service";
 import { readManifest } from "../app/run-store";
 import {
@@ -69,6 +70,7 @@ type TelegramBotCommand = {
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_MAX_RETRIES = 3;
 const SUBTITLE_SESSION_TTL_MS = 15 * 60 * 1_000;
+const SUBTITLE_MAX_ACTIVE_SESSIONS = 500;
 
 const BotConfigSchema = z.object({
   token: z.string().min(10),
@@ -564,6 +566,18 @@ function cleanupSubtitleSessions(
       sessions.delete(sessionId);
     }
   }
+
+  const overflow = sessions.size - SUBTITLE_MAX_ACTIVE_SESSIONS;
+  if (overflow <= 0) {
+    return;
+  }
+
+  const oldest = [...sessions.entries()]
+    .sort((a, b) => a[1].createdAt - b[1].createdAt)
+    .slice(0, overflow);
+  for (const [sessionId] of oldest) {
+    sessions.delete(sessionId);
+  }
 }
 
 function parseSubtitleCallbackData(
@@ -829,6 +843,28 @@ function escapeHtml(input: string): string {
     .replaceAll(">", "&gt;");
 }
 
+type PdfRenderPage = Page;
+
+const PDF_RENDER_BASE_OPTIONS = {
+  format: "A4",
+  printBackground: true,
+  margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
+} as const;
+
+function buildPdfHtml(rawText: string): string {
+  return [
+    "<!doctype html>",
+    "<html><head><meta charset='utf-8'>",
+    "<style>",
+    "body { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.45; margin: 24px; }",
+    "pre { white-space: pre-wrap; word-wrap: break-word; }",
+    "</style>",
+    "</head><body>",
+    `<pre>${escapeHtml(rawText)}</pre>`,
+    "</body></html>",
+  ].join("");
+}
+
 async function exportTextToDocx(textPath: string): Promise<string> {
   const outputPath = replaceFileExtension(textPath, ".docx");
   const rawText = await Bun.file(textPath).text();
@@ -850,37 +886,31 @@ async function exportTextToDocx(textPath: string): Promise<string> {
   return outputPath;
 }
 
-async function exportTextToPdf(textPath: string): Promise<string> {
+async function renderTextToPdfWithPage(
+  textPath: string,
+  page: PdfRenderPage,
+): Promise<string> {
   const outputPath = replaceFileExtension(textPath, ".pdf");
   const rawText = await Bun.file(textPath).text();
-  const html = [
-    "<!doctype html>",
-    "<html><head><meta charset='utf-8'>",
-    "<style>",
-    "body { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.45; margin: 24px; }",
-    "pre { white-space: pre-wrap; word-wrap: break-word; }",
-    "</style>",
-    "</head><body>",
-    `<pre>${escapeHtml(rawText)}</pre>`,
-    "</body></html>",
-  ].join("");
+  await page.setContent(buildPdfHtml(rawText), {
+    waitUntil: "domcontentloaded",
+  });
+  await page.pdf({
+    path: outputPath,
+    ...PDF_RENDER_BASE_OPTIONS,
+  });
+  return outputPath;
+}
 
+async function exportTextToPdf(textPath: string): Promise<string> {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "domcontentloaded" });
-    await page.pdf({
-      path: outputPath,
-      format: "A4",
-      printBackground: true,
-      margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
-    });
+    return await renderTextToPdfWithPage(textPath, page);
   } finally {
     await browser.close();
   }
-
-  return outputPath;
 }
 
 async function sendScribdExportFiles(
@@ -897,34 +927,59 @@ async function sendScribdExportFiles(
   const sourceFiles = textFiles.slice(0, 3);
   const docxFiles: string[] = [];
   const pdfFiles: string[] = [];
+  let sharedPdfPage: PdfRenderPage | null = null;
+  let closeSharedPdfBrowser: (() => Promise<void>) | null = null;
 
-  for (const textPath of sourceFiles) {
+  if (sourceFiles.length > 0) {
     try {
-      const file = Bun.file(textPath);
-      if (!(await file.exists())) {
-        continue;
-      }
-      docxFiles.push(await exportTextToDocx(textPath));
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ headless: true });
+      sharedPdfPage = await browser.newPage();
+      closeSharedPdfBrowser = async () => {
+        await browser.close();
+      };
     } catch (error) {
-      await logger.warn("scribd docx export failed", {
+      await logger.warn("scribd shared pdf browser init failed", {
         chatId,
-        textPath,
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
 
-    try {
+  try {
+    for (const textPath of sourceFiles) {
       const file = Bun.file(textPath);
       if (!(await file.exists())) {
         continue;
       }
-      pdfFiles.push(await exportTextToPdf(textPath));
-    } catch (error) {
-      await logger.warn("scribd pdf export failed", {
-        chatId,
-        textPath,
-        error: error instanceof Error ? error.message : String(error),
-      });
+
+      try {
+        docxFiles.push(await exportTextToDocx(textPath));
+      } catch (error) {
+        await logger.warn("scribd docx export failed", {
+          chatId,
+          textPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        if (sharedPdfPage) {
+          pdfFiles.push(await renderTextToPdfWithPage(textPath, sharedPdfPage));
+        } else {
+          pdfFiles.push(await exportTextToPdf(textPath));
+        }
+      } catch (error) {
+        await logger.warn("scribd pdf export failed", {
+          chatId,
+          textPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  } finally {
+    if (closeSharedPdfBrowser) {
+      await closeSharedPdfBrowser().catch(() => {});
     }
   }
 
@@ -1211,6 +1266,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               continue;
             }
 
+            subtitleSessions.delete(callbackData.sessionId);
             await api.answerCallbackQuery(
               callback.id,
               `Memproses subtitle ${callbackData.language}...`,
@@ -1445,6 +1501,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 languages: new Set(preferred.map((item) => item.code)),
                 createdAt: Date.now(),
               });
+              cleanupSubtitleSessions(subtitleSessions);
 
               const keyboard = buildSubtitleKeyboard(sessionId, preferred);
               await api.editMessage(
@@ -1711,6 +1768,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             let lastStatusAt = 0;
             let liveStatusText = "";
             let lastProgressAt = Date.now();
+            let heartbeatBusy = false;
             const safeStatusUpdate = async (
               messageId: number,
               textValue: string,
@@ -1757,6 +1815,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             });
 
             const heartbeat = setInterval(async () => {
+              if (heartbeatBusy) {
+                return;
+              }
+              heartbeatBusy = true;
               try {
                 const now = Date.now();
                 if (now - lastProgressAt < 12_000) {
@@ -1769,6 +1831,8 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 );
               } catch {
                 // noop
+              } finally {
+                heartbeatBusy = false;
               }
             }, 12_000);
 
@@ -1781,6 +1845,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   outputRoot: config.outputRoot,
                 },
                 {
+                  includePagesInResponse: false,
                   onProgress: async (progress) => {
                     const statusMap: Record<string, string> = {
                       init: "⏳ [1/5] Menyiapkan proses",

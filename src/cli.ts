@@ -47,11 +47,16 @@ async function runCli(argv: string[]): Promise<void> {
   const command = parseCliArgs(argv);
 
   if (command.command === "extract") {
-    const extraction = await runExtraction({
-      rootUrl: command.url,
-      maxPages: command.maxPages,
-      outputRoot: command.outputRoot,
-    });
+    const extraction = await runExtraction(
+      {
+        rootUrl: command.url,
+        maxPages: command.maxPages,
+        outputRoot: command.outputRoot,
+      },
+      {
+        includePagesInResponse: false,
+      },
+    );
 
     await writeLine(`Run ID: ${extraction.runId}`);
     await writeLine(`Site: ${extraction.site}`);
@@ -70,11 +75,16 @@ async function runCli(argv: string[]): Promise<void> {
       );
     }
 
-    const extraction = await runExtraction({
-      rootUrl: command.url,
-      maxPages: 1,
-      outputRoot: command.outputRoot,
-    });
+    const extraction = await runExtraction(
+      {
+        rootUrl: command.url,
+        maxPages: 1,
+        outputRoot: command.outputRoot,
+      },
+      {
+        includePagesInResponse: false,
+      },
+    );
 
     await writeLine(`Run ID: ${extraction.runId}`);
     await writeLine(`Site: ${extraction.site}`);

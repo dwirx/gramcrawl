@@ -26,11 +26,16 @@ export function createApiServer(outputRoot: string) {
         };
       }
 
-      const extraction = await runExtraction({
-        rootUrl: parsed.data.url,
-        maxPages: parsed.data.maxPages,
-        outputRoot,
-      });
+      const extraction = await runExtraction(
+        {
+          rootUrl: parsed.data.url,
+          maxPages: parsed.data.maxPages,
+          outputRoot,
+        },
+        {
+          includePagesInResponse: false,
+        },
+      );
 
       return {
         runId: extraction.runId,

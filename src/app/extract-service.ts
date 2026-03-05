@@ -15,6 +15,10 @@ import {
   type RunManifestItem,
 } from "./run-store";
 
+const DEFAULT_HISTORY_FILES_PER_EXTENSION = 120;
+const DEFAULT_MAX_GLOBAL_RUNS = 800;
+const DEFAULT_MAX_SITE_RUNS = 240;
+
 export type ExtractRequest = {
   rootUrl: string;
   maxPages: number;
@@ -28,6 +32,7 @@ export type ExtractionProgress = {
 
 export type ExtractOptions = {
   onProgress?: (progress: ExtractionProgress) => Promise<void> | void;
+  includePagesInResponse?: boolean;
 };
 
 export type ExtractResponse = {
@@ -38,6 +43,33 @@ export type ExtractResponse = {
   textFiles: string[];
   result: ExtractionResult;
 };
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+const MAX_HISTORY_FILES_PER_EXTENSION = readPositiveIntEnv(
+  "EXTRACT_HISTORY_KEEP_PER_EXT",
+  DEFAULT_HISTORY_FILES_PER_EXTENSION,
+);
+const MAX_GLOBAL_RUNS = readPositiveIntEnv(
+  "EXTRACT_MAX_GLOBAL_RUNS",
+  DEFAULT_MAX_GLOBAL_RUNS,
+);
+const MAX_SITE_RUNS = readPositiveIntEnv(
+  "EXTRACT_MAX_SITE_RUNS",
+  DEFAULT_MAX_SITE_RUNS,
+);
 
 function pickExportablePages(
   result: ExtractionResult,
@@ -119,9 +151,16 @@ async function cleanupDuplicateHistoryFiles(historyDir: string): Promise<void> {
   for (const [, files] of byExtension.entries()) {
     const ext = files[0]?.split(".").at(-1)?.toLowerCase() ?? "";
     files.sort((a, b) => b.localeCompare(a));
+    const overflow = files.slice(MAX_HISTORY_FILES_PER_EXTENSION);
+    for (const fileName of overflow) {
+      const fullPath = `${historyDir}/${fileName}`;
+      await unlink(fullPath).catch(() => {});
+    }
+
+    const keptFiles = files.slice(0, MAX_HISTORY_FILES_PER_EXTENSION);
     const seen = new Set<string>();
 
-    for (const fileName of files) {
+    for (const fileName of keptFiles) {
       const fullPath = `${historyDir}/${fileName}`;
       const content = await Bun.file(fullPath).text();
       const normalized = normalizeHistoryContent(ext, content);
@@ -247,6 +286,7 @@ export async function runExtraction(
   request: ExtractRequest,
   options?: ExtractOptions,
 ): Promise<ExtractResponse> {
+  const includePagesInResponse = options?.includePagesInResponse ?? true;
   const report = async (step: string, message: string): Promise<void> => {
     try {
       await options?.onProgress?.({ step, message });
@@ -306,14 +346,19 @@ export async function runExtraction(
   const filteredSite = siteManifest.filter((item) => item.id !== record.id);
   filteredSite.push(record);
   filteredGlobal.push(record);
-
-  await writeSiteManifest(
-    request.outputRoot,
-    site,
-    sortByCreatedAtDesc(filteredSite),
+  const sortedSite = sortByCreatedAtDesc(filteredSite).slice(0, MAX_SITE_RUNS);
+  const sortedGlobal = sortByCreatedAtDesc(filteredGlobal).slice(
+    0,
+    MAX_GLOBAL_RUNS,
   );
-  await writeManifest(request.outputRoot, sortByCreatedAtDesc(filteredGlobal));
+
+  await writeSiteManifest(request.outputRoot, site, sortedSite);
+  await writeManifest(request.outputRoot, sortedGlobal);
   await report("done", "Extract selesai");
+
+  if (!includePagesInResponse) {
+    result.pages = [];
+  }
 
   return {
     runId,

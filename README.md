@@ -1,170 +1,283 @@
-# Bun Template: High-Performance Tooling
+# 🤖 TeleExtract
 
-Template Bun yang dioptimalkan untuk kecepatan pengembangan maksimal menggunakan ekosistem **Oxc** (`oxlint`, `oxfmt`) dan **tsgo**.
+Bot Telegram + CLI untuk ekstraksi konten web, subtitle YouTube, dan workflow cookie anti-bot, dibangun dengan **Bun + TypeScript**.
 
-## 🚀 Fitur Utama
+Proyek ini fokus ke:
 
-- **Runtime:** [Bun](https://bun.sh) - Cepat, all-in-one JavaScript runtime & package manager.
-- **Linter Ultra Cepat:** Menggunakan `oxlint` (10-100x lebih cepat dari ESLint).
-- **Formatter Kilat:** Menggunakan `oxfmt` (Alternatif Prettier yang sangat cepat).
-- **Type-checker Instan:** Menggunakan `tsgo` untuk diagnosa TypeScript tanpa menunggu lama.
-- **Struktur Rapi:** Kode sumber berada di dalam folder `src/`.
-- **Integrasi VS Code:** Konfigurasi otomatis untuk format dan perbaikan lint saat simpan (Save).
+- ⚡ Kecepatan eksekusi
+- 🧠 Penggunaan memory yang efisien
+- 🧩 Alur operasional yang praktis (CLI, API, Telegram)
 
-## 🛠 Cara Penggunaan
+## ✨ Fitur Utama
 
-### 1. Instalasi Dependensi
+- 🌐 **Web Extractor**: ambil konten halaman jadi `JSON`, `Markdown`, `TXT`
+- 📚 **Mode Scribd**: shortcut ekstraksi 1 halaman + export tambahan
+- 🎬 **YouTube Subtitle**: list bahasa subtitle, download, dan konversi
+- 🍪 **Cookie Management**: import cookies Netscape/JSON ke `.env`
+- 🧪 **Quality Gate Cepat**: `tsgo` + `oxlint` + `oxfmt`
+- 🤖 **Telegram Bot**: command interaktif untuk extract/subtitle/runs/settings
+- 🛡️ **Fallback Browser Playwright**: bantu bypass halaman challenge/CAPTCHA (dengan cookie valid)
 
-Gunakan Bun untuk menginstal semua package yang dibutuhkan:
+## 🧱 Arsitektur Singkat
+
+- `src/cli.ts`: entrypoint CLI
+- `src/telegram-bot.ts`: entrypoint bot Telegram
+- `src/telegram/bot.ts`: orchestration command Telegram
+- `src/app/extract-service.ts`: pipeline extract + simpan output + manifest
+- `src/extractor/*`: crawler + parser konten halaman
+- `src/subtitle/service.ts`: integrasi `yt-dlp` untuk subtitle
+- `src/app/server.ts`: API server (`Elysia`)
+
+## ✅ Prasyarat
+
+- 🟢 Bun `>=1.3`
+- 🟢 Node-compatible environment (untuk toolchain)
+- 🟢 Token bot Telegram (jika pakai bot)
+
+## 🚀 Quick Start
+
+### 1) Install dependency
 
 ```bash
 bun install
 ```
 
-### 2. Menjalankan Proyek
-
-Untuk menjalankan file utama (`src/index.ts`):
+### 2) Jalankan quality check awal
 
 ```bash
-bun run src/index.ts
+bun run check:fast
 ```
 
-Untuk mode pengembangan dengan _hot reload_:
+### 3) Jalankan CLI extract
 
 ```bash
-bun --hot src/index.ts
+bun run extract -- https://example.com/article --max-pages 1
 ```
 
-### 3. Quality Control (Pemeriksaan Kode)
+### 4) Jalankan Telegram bot
 
-Template ini memiliki sistem pemeriksaan kualitas yang sudah diatur di `package.json`:
+```bash
+TELEGRAM_BOT_TOKEN=xxxx bun run bot:telegram
+```
 
-- **Cek Semua:** Jalankan pemeriksaan tipe, lint, dan format sekaligus.
-  ```bash
-  bun run check
-  ```
+## 🧰 Daftar Script Penting
 
-````
-- **Perbaikan Otomatis:** Perbaiki masalah lint dan format secara otomatis.
-  ```bash
-  bun run fix
-````
+| Script                                          | Fungsi                                                        |
+| ----------------------------------------------- | ------------------------------------------------------------- |
+| `bun run check:fast`                            | Lint + format check cepat                                     |
+| `bun run check`                                 | Typecheck + lint + format check (wajib sebelum selesai kerja) |
+| `bun run fix`                                   | Auto-fix lint + format                                        |
+| `bun run extract -- <url> [--max-pages N]`      | Extract halaman web                                           |
+| `bun run scribd -- <url-scribd>`                | Extract cepat Scribd                                          |
+| `bun run subtitle -- <youtube-url> [--lang xx]` | Cek/download subtitle                                         |
+| `bun run extract:list -- --limit 10`            | Lihat riwayat run                                             |
+| `bun run extract:serve -- --port 3000`          | Jalankan API server                                           |
+| `bun run bot:telegram`                          | Jalankan bot Telegram                                         |
 
-- **Cek Cepat:** Hanya lint dan format (tanpa type-check) untuk iterasi cepat.
-  ```bash
-  bun run check:fast
-  ```
+## 💻 Panduan CLI Lengkap
 
-### 4. CLI Website Extractor
+### Extract umum
 
-Tool ini sekarang punya mode CLI modular dan history run.
+```bash
+bun run src/cli.ts extract https://example.com/post --max-pages 3 --out output
+```
 
-- **Extract halaman**
-  ```bash
-  bun run extract -- https://example.com/article --max-pages 1
-  ```
-- **Extract cepat Scribd (1 halaman)**
-  ```bash
-  bun run scribd -- https://id.scribd.com/document/730392424/contoh
-  ```
-- **Lihat history extract**
-  ```bash
-  bun run extract:list -- --limit 10
-  ```
-- **Jalankan API server (Elysia)**
-  ```bash
-  bun run extract:serve -- --port 3000
-  ```
-- **Jalankan Telegram bot**
+### Extract Scribd (1 halaman)
 
-  ```bash
-  TELEGRAM_BOT_TOKEN=xxx bun run bot:telegram
-  ```
+```bash
+bun run src/cli.ts scribd https://www.scribd.com/document/123456789/sample --out output
+```
 
-  - Saat startup, bot akan auto-setup binary runtime:
-    - `yt-dlp` (download otomatis ke `.cache/bin` jika belum ada)
-    - Playwright Chromium (install otomatis jika belum ada)
+### Scribd browser mode (login/challenge manual)
 
-- **Import cookie browser (Netscape cookies.txt atau browser cookies.json) ke .env**
-  ```bash
-  bun run src/cli.ts cookie-import scribd.com /path/to/cookies.txt
-  bun run src/cli.ts cookie-import scribd.com /path/to/cookies.json
-  ```
-- **Set cookie manual ke .env**
-  ```bash
-  bun run src/cli.ts cookie-set projectmultatuli.org "cf_clearance=...; __cf_bm=..."
-  ```
+```bash
+bun run src/cli.ts scribd-browser https://www.scribd.com/document/123456789/sample --format pdf --wait-ms 300000
+```
 
-Output disimpan per-domain dan per-judul artikel agar rapi:
+### List history run
 
-- `output/sites/<domain>/last-extract.json`
-- `output/sites/<domain>/latest.json`
-- `output/sites/<domain>/history/<timestamp>__extract.json`
-- `output/sites/<domain>/<judul-artikel>/latest.md`
-- `output/sites/<domain>/<judul-artikel>/latest.txt`
-- `output/sites/<domain>/<judul-artikel>/latest.json`
-- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.md`
-- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.txt`
-- `output/sites/<domain>/<judul-artikel>/history/<timestamp>.json`
-- `output/sites/<domain>/runs-manifest.json`
-- `output/runs-manifest.json` (gabungan semua situs)
+```bash
+bun run src/cli.ts list --limit 20 --out output
+```
 
-Catatan:
+### Jalankan API
 
-- Folder artikel memakai slug judul artikel.
-- File history pakai prefix timestamp (tanggal + jam) supaya urutan otomatis.
-- Jika isi artikel tidak berubah, file history tidak ditambah lagi (anti-duplicate).
+```bash
+bun run src/cli.ts serve --port 3000 --out output
+```
 
-Command Telegram bot:
+### Cookie import dari file
 
-- `/extract <url> [maxPages]`
-- `/ytdlp <status|version|update>`
-- `/browser <on|off|status>`
-- upload `cookies.txt` langsung (tanpa command) untuk auto import domain dari file
-- `/cookieimport <domain>` (kirim file `cookies.txt` dan pakai command ini di caption)
-- `/cookieset <domain> <cookie-header>`
-- `/runs [limit]`
-- `/help`
+```bash
+bun run src/cli.ts cookie-import example.com /path/to/cookies.txt --env .env
+bun run src/cli.ts cookie-import example.com /path/to/cookies.json --env .env
+```
 
-Variabel env tambahan untuk website anti-bot:
+### Cookie set manual
 
-- `EXTRACT_COOKIE` untuk cookie global semua domain
-- `EXTRACT_COOKIE_MAP` untuk cookie per domain (format JSON string)
-  - contoh:
-    `EXTRACT_COOKIE_MAP="{\"projectmultatuli.org\":\"cf_clearance=...; __cf_bm=...\"}"`
-- `EXTRACT_BROWSER_FALLBACK=1` untuk aktifkan fallback browser session (Playwright)
-- `EXTRACT_BROWSER_HEADLESS=0` untuk mode non-headless (agar bisa verifikasi manual)
-- `EXTRACT_BROWSER_FORCE=1` untuk paksa pakai browser fallback dari awal (browser pasti dibuka saat extract)
-- `EXTRACT_BROWSER_WAIT_MS=120000` untuk lama tunggu challenge/verification
-- `EXTRACT_YT_DLP_AUTO_UPDATE=1` untuk auto-update `yt-dlp` lokal setiap ~24 jam (set `0` untuk nonaktif)
+```bash
+bun run src/cli.ts cookie-set example.com "cf_clearance=...; __cf_bm=..." --env .env
+```
 
-Jika memakai browser fallback, install browser binary dulu:
+### Subtitle
+
+```bash
+bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx"
+bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
+```
+
+## 📲 Command Telegram Bot
+
+- `/start` atau `/menu` → tampilkan menu utama
+- `/help` → bantuan lengkap
+- `/extract <url> [maxPages]` → extract website
+- `/scribd <url-scribd>` → extract Scribd 1 halaman
+- `/subtitle <url-youtube>` → pilih bahasa subtitle via tombol
+- `/mark <url>` atau `/md <url>` → convert URL ke Markdown
+- `/runs [limit]` → lihat riwayat run
+- `/browser <on|off|status>` → mode browser fallback
+- `/subtitletimestamp <on|off|status>` / `/timestamp ...` → mode timestamp subtitle
+- `/ytdlp <status|version|update>` → status/update binary `yt-dlp`
+- `/cookieimport <domain>` → import cookie dari file upload
+- `/cookieset <domain> <cookie-header>` → set cookie manual
+
+Tip:
+
+- Kirim URL langsung tanpa command untuk extract 1 halaman.
+- Upload `cookies.txt` tanpa command untuk auto-import multi domain.
+
+## 🔐 Konfigurasi Environment
+
+### Wajib (bot)
+
+| Variable             | Fungsi             |
+| -------------------- | ------------------ |
+| `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
+
+### Umum
+
+| Variable                     | Default  | Fungsi                                      |
+| ---------------------------- | -------- | ------------------------------------------- |
+| `EXTRACT_OUTPUT_ROOT`        | `output` | Root folder output                          |
+| `EXTRACT_ENV_PATH`           | `.env`   | Path file env untuk bot                     |
+| `EXTRACT_SUBTITLE_TIMESTAMP` | `1`      | Sertakan timestamp subtitle (`0` untuk off) |
+
+### Cookie & anti-bot
+
+| Variable                   | Default | Fungsi                            |
+| -------------------------- | ------- | --------------------------------- |
+| `EXTRACT_COOKIE`           | `""`    | Cookie global untuk semua domain  |
+| `EXTRACT_COOKIE_MAP`       | `""`    | Cookie per domain (JSON string)   |
+| `EXTRACT_BROWSER_FALLBACK` | `0`     | Aktifkan browser fallback         |
+| `EXTRACT_BROWSER_FORCE`    | `0`     | Paksa browser fallback sejak awal |
+| `EXTRACT_BROWSER_HEADLESS` | `1`     | `0` untuk mode visible            |
+| `EXTRACT_BROWSER_WAIT_MS`  | `90000` | Waktu tunggu challenge/CAPTCHA    |
+
+Contoh `EXTRACT_COOKIE_MAP`:
+
+```bash
+EXTRACT_COOKIE_MAP='{"example.com":"cf_clearance=...; __cf_bm=..."}'
+```
+
+### yt-dlp
+
+| Variable                     | Default     | Fungsi                    |
+| ---------------------------- | ----------- | ------------------------- |
+| `EXTRACT_YT_DLP_BIN`         | auto-detect | Path binary yt-dlp manual |
+| `EXTRACT_YT_DLP_AUTO_UPDATE` | `1`         | Auto-update yt-dlp lokal  |
+
+### 🧠 Optimasi Memory/Retensi Data
+
+| Variable                       | Default | Fungsi                                                  |
+| ------------------------------ | ------- | ------------------------------------------------------- |
+| `EXTRACT_HISTORY_KEEP_PER_EXT` | `120`   | Maks history per ekstensi (`md/txt/json`) per artikel   |
+| `EXTRACT_MAX_GLOBAL_RUNS`      | `800`   | Maks item pada `output/runs-manifest.json`              |
+| `EXTRACT_MAX_SITE_RUNS`        | `240`   | Maks item pada `output/sites/<site>/runs-manifest.json` |
+
+## 📁 Struktur Output
+
+```text
+output/
+└── sites/
+    └── <domain>/
+        ├── last-extract.json
+        ├── latest.json
+        ├── runs-manifest.json
+        ├── history/
+        │   └── <timestamp>__extract.json
+        └── <article-slug>/
+            ├── latest.md
+            ├── latest.txt
+            ├── latest.json
+            ├── latest.meta.json
+            └── history/
+                ├── <timestamp>.md
+                ├── <timestamp>.txt
+                └── <timestamp>.json
+```
+
+## ⚙️ Optimasi Performa & Memory yang Sudah Aktif
+
+- 🚦 Pembatasan antrean link crawler agar tidak menumpuk URL berlebih
+- 🪶 Response extract bisa mode ringan (`pages` tidak dibawa ke caller)
+- 🧹 Cleanup sesi subtitle + batas maksimum sesi aktif
+- 🧾 Batas capture output `yt-dlp` supaya buffer stdout/stderr tidak membengkak
+- 📄 Reuse browser/page Playwright saat export PDF Scribd batch
+- 🗃️ Retensi manifest/history agar ukuran data jangka panjang tetap terkontrol
+
+## 🧪 Quality Gate (Wajib)
+
+Jalankan ini sebelum menganggap pekerjaan selesai:
+
+```bash
+bun run check
+```
+
+Opsional saat iterasi cepat:
+
+```bash
+bun run check:fast
+```
+
+Unit test:
+
+```bash
+bun test
+```
+
+## 🩺 Troubleshooting
+
+### Bot gagal extract situs tertentu
+
+- Pastikan cookie valid (`cf_clearance`, dsb.)
+- Aktifkan browser fallback:
+
+```bash
+EXTRACT_BROWSER_FALLBACK=1
+```
+
+### Playwright Chromium belum terpasang
 
 ```bash
 bunx playwright install chromium
 ```
 
-Saat `/extract` selesai, bot akan mengirim file:
+### yt-dlp tidak ditemukan
 
-- `extract.json`
-- `.md`
-- `.txt`
+- Set path manual:
 
-## 📂 Struktur Direktori
-
-- `src/`: Folder utama untuk kode sumber TypeScript.
-- `.vscode/`: Konfigurasi editor untuk integrasi tooling otomatis.
-- `.oxlintrc.json`: Pengaturan aturan linter.
-- `.oxfmtrc.jsonc`: Pengaturan pemformatan kode.
-- `SKILL.md`: Panduan teknis penggunaan stack tooling ini.
-- `AGENTS.md`: Instruksi khusus untuk asisten AI (LLM).
-
-## 📝 Konvensi Pengembangan
-
-1. **Gunakan Primitif Bun:** Lebih disukai menggunakan API bawaan Bun (`Bun.file`, `Bun.serve`) daripada modul Node.js.
-2. **Type Safety:** Hindari penggunaan `any`. Linter akan memberikan peringatan jika ditemukan.
-3. **Format Otomatis:** Pastikan editor Anda menggunakan pengaturan yang ada di `.vscode/settings.json` agar kode selalu rapi secara konsisten.
-
+```bash
+EXTRACT_YT_DLP_BIN=/path/to/yt-dlp
 ```
 
-```
+Atau jalankan `/ytdlp update` dari bot.
+
+## 🤝 Catatan Pengembangan
+
+- Gunakan API Bun (`Bun.file`, `Bun.write`, dll.) saat memungkinkan
+- Hindari `any`; jaga type-safety
+- Ikuti standar lint/format project
+
+---
+
+Dibuat untuk workflow ekstraksi konten yang cepat, praktis, dan stabil. 🚀

@@ -25,6 +25,9 @@ export type CrawlOptions = {
 };
 
 const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com"];
+const QUEUE_LIMIT_MULTIPLIER = 25;
+const MIN_QUEUE_LIMIT = 60;
+const MAX_LINKS_SCANNED_PER_PAGE = 400;
 
 function readCookieOverride(url: string): string {
   const host = new URL(url).hostname.toLowerCase();
@@ -221,6 +224,10 @@ export async function crawlCheerioDocs(
   options?: CrawlOptions,
 ): Promise<ExtractionResult> {
   const scopedRootUrl = new URL(rootUrl);
+  const queueLimit = Math.max(
+    maxPages * QUEUE_LIMIT_MULTIPLIER,
+    MIN_QUEUE_LIMIT,
+  );
 
   const cheerio = await loadCheerioModule();
 
@@ -374,7 +381,16 @@ export async function crawlCheerioDocs(
         message: `Berhasil: ${pages.length}/${maxPages} halaman`,
       });
 
+      let scannedLinks = 0;
       for (const link of extracted.links) {
+        if (
+          scannedLinks >= MAX_LINKS_SCANNED_PER_PAGE ||
+          queue.length >= queueLimit
+        ) {
+          break;
+        }
+        scannedLinks += 1;
+
         if (
           !visited.has(link) &&
           !queued.has(link) &&

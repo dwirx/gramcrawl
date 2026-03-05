@@ -72,6 +72,7 @@ const YT_DLP_RELEASE_URL =
 const YT_DLP_META_PATH = `${YT_DLP_LOCAL_DIR}/yt-dlp.meta.json`;
 const YT_DLP_AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const YT_DLP_UPDATE_TIMEOUT_MS = 120_000;
+const YT_DLP_CAPTURE_LIMIT_BYTES = 16 * 1024 * 1024;
 
 let ytDlpInstallPromise: Promise<string> | null = null;
 let ytDlpUpdatePromise: Promise<YtDlpUpdateResult> | null = null;
@@ -80,6 +81,20 @@ type SubtitleCue = {
   start: string;
   text: string;
 };
+
+function appendLimitedOutput(current: string, chunk: Buffer | string): string {
+  if (current.length >= YT_DLP_CAPTURE_LIMIT_BYTES) {
+    return current;
+  }
+
+  const text = chunk.toString();
+  const allowedLength = YT_DLP_CAPTURE_LIMIT_BYTES - current.length;
+  if (text.length <= allowedLength) {
+    return `${current}${text}`;
+  }
+
+  return `${current}${text.slice(0, allowedLength)}`;
+}
 
 function normalizeWhitespace(value: string): string {
   return value.replaceAll(/\s+/g, " ").trim();
@@ -646,11 +661,11 @@ async function runYtDlpWithBinary(
     }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
+      stdout = appendLimitedOutput(stdout, chunk);
     });
 
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+      stderr = appendLimitedOutput(stderr, chunk);
     });
 
     child.on("error", (error) => {
