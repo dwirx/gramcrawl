@@ -39,10 +39,90 @@ function looksLikeChallengePage(html: string): boolean {
   return markers.some((marker) => lowered.includes(marker));
 }
 
+function readCookieOverride(url: string): string {
+  const host = new URL(url).hostname.toLowerCase();
+  const globalCookie = process.env.EXTRACT_COOKIE?.trim() ?? "";
+  const mappedRaw = process.env.EXTRACT_COOKIE_MAP?.trim() ?? "";
+
+  if (!mappedRaw) {
+    return globalCookie;
+  }
+
+  try {
+    const mapped = JSON.parse(mappedRaw) as Record<string, string>;
+    const exact = mapped[host]?.trim();
+    if (exact) {
+      return exact;
+    }
+
+    const wildcard = Object.entries(mapped).find(([domain]) =>
+      host.endsWith(domain.replace(/^\*\./, "")),
+    )?.[1];
+
+    return wildcard?.trim() || globalCookie;
+  } catch {
+    return globalCookie;
+  }
+}
+
+function parseCookieHeaderToBrowserCookies(
+  cookieHeader: string,
+  hostname: string,
+): Array<{
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  secure: boolean;
+  sameSite: "None";
+}> {
+  const cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    secure: boolean;
+    sameSite: "None";
+  }> = [];
+
+  for (const part of cookieHeader.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex <= 0) {
+      continue;
+    }
+
+    const name = trimmed.slice(0, eqIndex).trim();
+    const value = trimmed.slice(eqIndex + 1).trim();
+    if (!name) {
+      continue;
+    }
+
+    cookies.push({
+      name,
+      value,
+      domain: hostname,
+      path: "/",
+      secure: true,
+      sameSite: "None",
+    });
+  }
+
+  return cookies;
+}
+
 export async function fetchBrowserFallbackHtml(
   url: string,
+  options?: {
+    force?: boolean;
+  },
 ): Promise<string | null> {
-  if (!shouldEnableBrowserFallback()) {
+  const force = options?.force ?? false;
+  if (!shouldEnableBrowserFallback() && !force) {
     return null;
   }
 
@@ -67,6 +147,17 @@ export async function fetchBrowserFallbackHtml(
   );
 
   try {
+    const cookieHeader = readCookieOverride(url);
+    if (cookieHeader) {
+      const cookies = parseCookieHeaderToBrowserCookies(
+        cookieHeader,
+        parsed.hostname,
+      );
+      if (cookies.length > 0) {
+        await context.addCookies(cookies);
+      }
+    }
+
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(url, {
       waitUntil: "domcontentloaded",

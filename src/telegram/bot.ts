@@ -14,6 +14,7 @@ import {
   resolveOriginalLanguage,
   type SubtitleLanguage,
 } from "../subtitle/service";
+import { extractWithMarkdownNew } from "../mark/service";
 import { parseTelegramCommand } from "./command-parser";
 import { createLogger } from "./logger";
 
@@ -294,6 +295,10 @@ function buildHelpMessage(): string {
     "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
     "• /subtitle <url>",
     "  Ambil subtitle YouTube (pilih bahasa lewat tombol).",
+    "• /mark <url>",
+    "  Convert URL ke Markdown via markdown.new.",
+    "• /md <url>",
+    "  Alias cepat dari /mark.",
     "• /runs [limit]",
     "  Lihat riwayat extract terbaru.",
     "",
@@ -329,6 +334,14 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "subtitle",
       description: "Ambil subtitle YouTube: /subtitle <url>",
+    },
+    {
+      command: "mark",
+      description: "Convert URL ke Markdown: /mark <url>",
+    },
+    {
+      command: "md",
+      description: "Alias /mark: /md <url>",
     },
     { command: "runs", description: "Lihat riwayat extract terbaru" },
     {
@@ -397,6 +410,8 @@ function buildUnknownCommandMessage(input: string): string {
     "• /extract https://example.com/artikel 1",
     "• /scribd https://www.scribd.com/document/123456789/judul",
     "• /subtitle https://www.youtube.com/watch?v=xxxx",
+    "• /mark https://si.inc/posts/fdm1/",
+    "• /md https://si.inc/posts/fdm1/",
     "• /runs 5",
     "",
     "Ketik /help atau /menu untuk daftar perintah lengkap.",
@@ -1432,6 +1447,83 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
               url: listed.webpageUrl,
               languages: listed.languages.length,
             });
+            continue;
+          }
+
+          if (command.kind === "mark") {
+            await api.sendChatAction(chatId, "typing");
+            const statusMessageId = await api.sendMessage(
+              chatId,
+              buildStatusCard("⏳ [1/3] Memproses /mark", [
+                { label: "URL", value: command.url },
+              ]),
+            );
+
+            try {
+              const marked = await extractWithMarkdownNew(
+                command.url,
+                config.outputRoot,
+              );
+
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard("✅ [2/3] Markdown berhasil dibuat", [
+                  { label: "Title", value: marked.title },
+                  { label: "Method", value: marked.method },
+                  {
+                    label: "Tokens",
+                    value: marked.tokens ?? "n/a",
+                  },
+                ]),
+              );
+
+              await api.sendChatAction(chatId, "upload_document");
+              await api.sendDocument(
+                chatId,
+                marked.markdownPath,
+                "Markdown (.md)",
+                "mark.md",
+              );
+              await api.sendChatAction(chatId, "upload_document");
+              await api.sendDocument(
+                chatId,
+                marked.textPath,
+                "Markdown mirror (.txt)",
+                "mark.txt",
+              );
+
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard("✅ [3/3] /mark selesai", [
+                  { label: "Output", value: marked.outputDir },
+                  { label: "File", value: "mark.md + mark.txt" },
+                ]),
+              );
+
+              await logger.info("mark completed", {
+                chatId,
+                url: command.url,
+                title: marked.title,
+                method: marked.method,
+                tokens: marked.tokens,
+              });
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              await api.editMessage(
+                chatId,
+                statusMessageId,
+                buildStatusCard("❌ /mark gagal", [
+                  { label: "Detail", value: detail.slice(0, 350) },
+                ]),
+              );
+              await logger.error("mark failed", error, {
+                chatId,
+                url: command.url,
+              });
+            }
             continue;
           }
 

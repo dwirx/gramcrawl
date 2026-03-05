@@ -29,6 +29,28 @@ describe("parseTelegramCommand", () => {
     expect(parsed.url).toBe("https://www.youtube.com/watch?v=7ZdPKEf-LXA");
   });
 
+  test("parses /mark command", () => {
+    const parsed = parseTelegramCommand("/mark https://si.inc/posts/fdm1/");
+
+    expect(parsed.kind).toBe("mark");
+    if (parsed.kind !== "mark") {
+      throw new Error("Expected mark command");
+    }
+
+    expect(parsed.url).toBe("https://si.inc/posts/fdm1/");
+  });
+
+  test("parses /md command as mark alias", () => {
+    const parsed = parseTelegramCommand("/md https://si.inc/posts/fdm1/");
+
+    expect(parsed.kind).toBe("mark");
+    if (parsed.kind !== "mark") {
+      throw new Error("Expected mark command");
+    }
+
+    expect(parsed.url).toBe("https://si.inc/posts/fdm1/");
+  });
+
   test("parses /scribd command as extract with maxPages=1", () => {
     const parsed = parseTelegramCommand(
       "/scribd https://www.scribd.com/document/123456789/sample",

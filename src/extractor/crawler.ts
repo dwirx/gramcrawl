@@ -24,6 +24,8 @@ export type CrawlOptions = {
   onProgress?: (progress: CrawlProgress) => Promise<void> | void;
 };
 
+const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com"];
+
 function readCookieOverride(url: string): string {
   const host = new URL(url).hostname.toLowerCase();
   const globalCookie = process.env.EXTRACT_COOKIE?.trim() ?? "";
@@ -138,18 +140,49 @@ function looksLikeBlockedPage(
 }
 
 function buildBlockedError(url: string): Error {
+  const host = new URL(url).hostname;
+
   return new Error(
     [
       `Gagal mengambil ${url} (blocked/no readable content).`,
-      "Kemungkinan website memakai anti-bot (Cloudflare/CAPTCHA).",
-      "Solusi: set cookie browser di .env:",
-      "EXTRACT_COOKIE='cf_clearance=...; ...'",
-      "atau domain map:",
-      `EXTRACT_COOKIE_MAP='{"projectmultatuli.org":"cf_clearance=...; ..."}'`,
-      "Alternatif browser-session:",
+      "Kemungkinan situs dilindungi anti-bot/CAPTCHA atau butuh autentikasi.",
+      "Coba langkah berikut:",
+      "1) Import/set cookie valid dari browser login.",
+      "   - EXTRACT_COOKIE='cf_clearance=...; ...'",
+      `   - EXTRACT_COOKIE_MAP='{"${host}":"cf_clearance=...; ..."}'`,
+      "2) Aktifkan browser fallback (cookie akan dipasang ke sesi browser):",
       "EXTRACT_BROWSER_FALLBACK=1 (opsional: EXTRACT_BROWSER_HEADLESS=0 untuk verifikasi manual, EXTRACT_BROWSER_WAIT_MS=120000).",
     ].join(" "),
   );
+}
+
+function shouldAutoBrowserFallback(url: string): boolean {
+  const host = new URL(url).hostname.toLowerCase();
+  return AUTO_BROWSER_FALLBACK_HOSTS.some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+}
+
+function looksLikeUnreadableExtraction(page: ExtractedPage): boolean {
+  const normalizedTitle = page.title.trim().toLowerCase();
+  const normalizedArticleTitle = page.articleTitle.trim().toLowerCase();
+  const normalizedBody = page.articleBodyText.trim().toLowerCase();
+
+  if (normalizedBody.length < 120) {
+    if (!normalizedBody) {
+      return true;
+    }
+
+    if (
+      normalizedTitle.length > 0 &&
+      normalizedBody === normalizedTitle &&
+      normalizedArticleTitle === normalizedTitle
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function fetchMediumProviderHtml(url: string): Promise<string | null> {
@@ -217,10 +250,13 @@ export async function crawlCheerioDocs(
     try {
       const html = await fetchHtml(currentUrl);
       let extracted: ExtractedPage | null = null;
-      const forceBrowser = isBrowserFallbackForced();
+      const forceBrowser =
+        isBrowserFallbackForced() || shouldAutoBrowserFallback(currentUrl);
 
       if (forceBrowser) {
-        const browserHtml = await fetchBrowserFallbackHtml(currentUrl);
+        const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
+          force: true,
+        });
 
         if (browserHtml) {
           const browserExtracted = extractPageFromHtml(
@@ -320,7 +356,11 @@ export async function crawlCheerioDocs(
         }
       }
 
-      if (!extracted || looksLikeBlockedPage(extracted)) {
+      if (
+        !extracted ||
+        looksLikeBlockedPage(extracted) ||
+        looksLikeUnreadableExtraction(extracted)
+      ) {
         throw buildBlockedError(currentUrl);
       }
 
