@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatLogLine } from "./logger";
+import { formatLogLine, isLogLevelEnabled, resolveLogLevel } from "./logger";
 
 describe("formatLogLine", () => {
   test("renders timestamp, level, component, message", () => {
@@ -30,5 +30,31 @@ describe("formatLogLine", () => {
     expect(line).toContain("chatId=10");
     expect(line).toContain("action=sendDocument");
     expect(line).toContain("error=network down");
+  });
+
+  test("sanitizes and truncates long context value", () => {
+    const line = formatLogLine({
+      level: "info",
+      component: "telegram-bot",
+      message: "extract progress",
+      context: {
+        detail: `${"x".repeat(220)}\nsecond-line`,
+      },
+      now: new Date("2026-02-20T00:00:00.000Z"),
+    });
+
+    expect(line).toContain("detail=");
+    expect(line).toContain("...(truncated:");
+    expect(line).not.toContain("\nsecond-line");
+  });
+
+  test("resolves and compares log levels", () => {
+    expect(resolveLogLevel("debug")).toBe("debug");
+    expect(resolveLogLevel("error")).toBe("error");
+    expect(resolveLogLevel("unknown")).toBe("info");
+
+    expect(isLogLevelEnabled("debug", "info")).toBeFalse();
+    expect(isLogLevelEnabled("info", "info")).toBeTrue();
+    expect(isLogLevelEnabled("error", "warn")).toBeTrue();
   });
 });

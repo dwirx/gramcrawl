@@ -11,6 +11,46 @@ type FormatLogLineInput = {
   now?: Date;
 };
 
+const LOG_LEVEL_ORDER: Record<LogLevel, number> = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
+const LOG_VALUE_MAX_LENGTH = 180;
+
+function sanitizeLogValue(value: string): string {
+  const compact = value.replaceAll(/\s+/g, " ").trim();
+  if (compact.length <= LOG_VALUE_MAX_LENGTH) {
+    return compact;
+  }
+
+  const remaining = compact.length - LOG_VALUE_MAX_LENGTH;
+  return `${compact.slice(0, LOG_VALUE_MAX_LENGTH)}...(truncated:${remaining})`;
+}
+
+export function resolveLogLevel(raw: string | undefined): LogLevel {
+  const normalized = raw?.trim().toLowerCase();
+  if (
+    normalized === "debug" ||
+    normalized === "info" ||
+    normalized === "warn" ||
+    normalized === "error"
+  ) {
+    return normalized;
+  }
+
+  return "info";
+}
+
+export function isLogLevelEnabled(
+  level: LogLevel,
+  minLevel: LogLevel,
+): boolean {
+  return LOG_LEVEL_ORDER[level] >= LOG_LEVEL_ORDER[minLevel];
+}
+
 function normalizeError(error: unknown): string | null {
   if (!error) {
     return null;
@@ -23,15 +63,18 @@ function normalizeError(error: unknown): string | null {
       .filter(Boolean)
       .slice(1, 2)
       .join(" | ");
-    return stackLine ? `${error.message} | ${stackLine}` : error.message;
+    const rendered = stackLine
+      ? `${error.message} | ${stackLine}`
+      : error.message;
+    return sanitizeLogValue(rendered);
   }
 
   if (typeof error === "string") {
-    return error;
+    return sanitizeLogValue(error);
   }
 
   try {
-    return JSON.stringify(error);
+    return sanitizeLogValue(JSON.stringify(error));
   } catch {
     return "unknown-error";
   }
@@ -51,7 +94,7 @@ function formatContext(context: LogContext | undefined): string {
   }
 
   const rendered = entries
-    .map(([key, value]) => `${key}=${String(value)}`)
+    .map(([key, value]) => `${key}=${sanitizeLogValue(String(value))}`)
     .join(" ");
   return ` ${rendered}`;
 }
@@ -70,12 +113,18 @@ export function formatLogLine(input: FormatLogLineInput): string {
 }
 
 export function createLogger(component: string) {
+  const minLevel = resolveLogLevel(process.env.EXTRACT_LOG_LEVEL);
+
   async function write(
     level: LogLevel,
     message: string,
     context?: LogContext,
     error?: unknown,
   ): Promise<void> {
+    if (!isLogLevelEnabled(level, minLevel)) {
+      return;
+    }
+
     const line = formatLogLine({
       level,
       component,
