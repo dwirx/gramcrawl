@@ -21,6 +21,7 @@ export type TelegramCommand =
   | { kind: "cookieImport"; domain: string }
   | { kind: "cookieSet"; domain: string; cookie: string }
   | { kind: "cancel" }
+  | { kind: "restart" }
   | { kind: "stats" }
   | { kind: "clearCache" }
   | { kind: "clearChat"; limit: number }
@@ -241,8 +242,12 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (command === "/cancel") {
+  if (command === "/cancel" || command === "/stop") {
     return { kind: "cancel" };
+  }
+
+  if (command === "/restart") {
+    return { kind: "restart" };
   }
 
   if (command === "/stats") {

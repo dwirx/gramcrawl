@@ -23,12 +23,68 @@ export type CrawlProgress = {
 export type CrawlOptions = {
   onProgress?: (progress: CrawlProgress) => Promise<void> | void;
   shouldCancel?: () => boolean;
+  signal?: AbortSignal;
 };
 
 const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com"];
 const QUEUE_LIMIT_MULTIPLIER = 25;
 const MIN_QUEUE_LIMIT = 60;
 const MAX_LINKS_SCANNED_PER_PAGE = 400;
+const FETCH_TIMEOUT_MS = 20_000;
+
+function isCancelled(options?: CrawlOptions): boolean {
+  return Boolean(options?.shouldCancel?.() || options?.signal?.aborted);
+}
+
+function throwIfCancelled(options?: CrawlOptions): void {
+  if (isCancelled(options)) {
+    throw new Error("Extraction cancelled by user");
+  }
+}
+
+function isCancellationError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      error.name === "AbortError" ||
+      message.includes("cancelled by user") ||
+      message.includes("aborted")
+    );
+  }
+  return false;
+}
+
+function createRequestSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timeout (${timeoutMs}ms)`));
+  }, timeoutMs);
+
+  const onExternalAbort = (): void => {
+    controller.abort(externalSignal?.reason ?? new Error("Aborted"));
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+    },
+  };
+}
 
 function readCookieOverride(url: string): string {
   const host = new URL(url).hostname.toLowerCase();
@@ -57,7 +113,15 @@ function readCookieOverride(url: string): string {
   }
 }
 
-async function fetchHtml(url: string): Promise<string | null> {
+async function fetchHtml(
+  url: string,
+  externalSignal?: AbortSignal,
+): Promise<string | null> {
+  const { signal, cleanup } = createRequestSignal(
+    FETCH_TIMEOUT_MS,
+    externalSignal,
+  );
+
   try {
     const cookie = readCookieOverride(url);
     const response = await fetch(url, {
@@ -70,7 +134,7 @@ async function fetchHtml(url: string): Promise<string | null> {
         "cache-control": "no-cache",
         ...(cookie ? { cookie } : {}),
       },
-      signal: AbortSignal.timeout(20_000),
+      signal,
     });
 
     if (!response.ok) {
@@ -78,8 +142,13 @@ async function fetchHtml(url: string): Promise<string | null> {
     }
 
     return await response.text();
-  } catch {
+  } catch (error) {
+    if (externalSignal?.aborted || isCancellationError(error)) {
+      throw new Error("Extraction cancelled by user");
+    }
     return null;
+  } finally {
+    cleanup();
   }
 }
 
@@ -189,7 +258,10 @@ function looksLikeUnreadableExtraction(page: ExtractedPage): boolean {
   return false;
 }
 
-async function fetchMediumProviderHtml(url: string): Promise<string | null> {
+async function fetchMediumProviderHtml(
+  url: string,
+  externalSignal?: AbortSignal,
+): Promise<string | null> {
   const hostname = new URL(url).hostname.toLowerCase();
   const isMediumHost =
     hostname === "medium.com" || hostname.endsWith(".medium.com");
@@ -197,6 +269,11 @@ async function fetchMediumProviderHtml(url: string): Promise<string | null> {
   if (!isMediumHost) {
     return null;
   }
+
+  const { signal, cleanup } = createRequestSignal(
+    FETCH_TIMEOUT_MS,
+    externalSignal,
+  );
 
   try {
     const response = await fetch(`https://freedium.cfd/${url}`, {
@@ -206,7 +283,7 @@ async function fetchMediumProviderHtml(url: string): Promise<string | null> {
         accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
-      signal: AbortSignal.timeout(20_000),
+      signal,
     });
 
     if (!response.ok) {
@@ -214,8 +291,13 @@ async function fetchMediumProviderHtml(url: string): Promise<string | null> {
     }
 
     return await response.text();
-  } catch {
+  } catch (error) {
+    if (externalSignal?.aborted || isCancellationError(error)) {
+      throw new Error("Extraction cancelled by user");
+    }
     return null;
+  } finally {
+    cleanup();
   }
 }
 
@@ -238,9 +320,7 @@ export async function crawlCheerioDocs(
   const pages: ExtractedPage[] = [];
 
   while (queue.length > 0 && pages.length < maxPages) {
-    if (options?.shouldCancel?.()) {
-      throw new Error("Extraction cancelled by user");
-    }
+    throwIfCancelled(options);
 
     const currentUrl = queue.shift();
 
@@ -260,10 +340,8 @@ export async function crawlCheerioDocs(
     });
 
     try {
-      if (options?.shouldCancel?.()) {
-        throw new Error("Extraction cancelled by user");
-      }
-      const html = await fetchHtml(currentUrl);
+      throwIfCancelled(options);
+      const html = await fetchHtml(currentUrl, options?.signal);
       let extracted: ExtractedPage | null = null;
       const forceBrowser =
         isBrowserFallbackForced() || shouldAutoBrowserFallback(currentUrl);
@@ -271,6 +349,7 @@ export async function crawlCheerioDocs(
       if (forceBrowser) {
         const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
           force: true,
+          signal: options?.signal,
         });
 
         if (browserHtml) {
@@ -305,7 +384,9 @@ export async function crawlCheerioDocs(
         extracted.articleBodyText.length < 160 ||
         blockedByChallenge
       ) {
-        const fallback = await fetchRenderedFallbackArticle(currentUrl);
+        const fallback = await fetchRenderedFallbackArticle(currentUrl, {
+          signal: options?.signal,
+        });
 
         if (!extracted && fallback) {
           extracted = buildExtractedPageFromRenderedFallback(
@@ -332,7 +413,10 @@ export async function crawlCheerioDocs(
       const stillBlocked = extracted ? looksLikeBlockedPage(extracted) : false;
 
       if (!extracted || stillBlocked) {
-        const mediumProviderHtml = await fetchMediumProviderHtml(currentUrl);
+        const mediumProviderHtml = await fetchMediumProviderHtml(
+          currentUrl,
+          options?.signal,
+        );
 
         if (mediumProviderHtml) {
           const mediumExtracted = extractPageFromHtml(
@@ -352,7 +436,9 @@ export async function crawlCheerioDocs(
       }
 
       if (!extracted || looksLikeBlockedPage(extracted)) {
-        const browserHtml = await fetchBrowserFallbackHtml(currentUrl);
+        const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
+          signal: options?.signal,
+        });
 
         if (browserHtml) {
           const browserExtracted = extractPageFromHtml(
@@ -391,7 +477,7 @@ export async function crawlCheerioDocs(
 
       let scannedLinks = 0;
       for (const link of extracted.links) {
-        if (options?.shouldCancel?.()) {
+        if (isCancelled(options)) {
           break;
         }
         if (
@@ -411,7 +497,10 @@ export async function crawlCheerioDocs(
           queued.add(link);
         }
       }
-    } catch {
+    } catch (error) {
+      if (isCancelled(options) || isCancellationError(error)) {
+        throw new Error("Extraction cancelled by user");
+      }
       await options?.onProgress?.({
         step: "page-failed",
         url: currentUrl,

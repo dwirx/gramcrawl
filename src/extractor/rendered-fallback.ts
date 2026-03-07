@@ -9,6 +9,38 @@ export type RenderedFallbackArticle = {
   publishedAt: string | null;
 };
 
+function createRequestSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timeout (${timeoutMs}ms)`));
+  }, timeoutMs);
+
+  const onExternalAbort = (): void => {
+    controller.abort(externalSignal?.reason ?? new Error("Aborted"));
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+    },
+  };
+}
+
 function normalizeWhitespace(value: string): string {
   return value.replaceAll(/\s+/g, " ").trim();
 }
@@ -135,16 +167,27 @@ export function parseRenderedFallbackDocument(
 
 export async function fetchRenderedFallbackArticle(
   url: string,
+  options?: { signal?: AbortSignal },
 ): Promise<RenderedFallbackArticle | null> {
+  const { signal, cleanup } = createRequestSignal(20_000, options?.signal);
   const proxyUrl = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
-  const response = await fetch(proxyUrl, {
-    signal: AbortSignal.timeout(20_000),
-  });
+  try {
+    const response = await fetch(proxyUrl, {
+      signal,
+    });
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return null;
+    }
+
+    const rawText = await response.text();
+    return parseRenderedFallbackDocument(rawText);
+  } catch {
+    if (options?.signal?.aborted) {
+      throw new Error("Extraction cancelled by user");
+    }
     return null;
+  } finally {
+    cleanup();
   }
-
-  const rawText = await response.text();
-  return parseRenderedFallbackDocument(rawText);
 }

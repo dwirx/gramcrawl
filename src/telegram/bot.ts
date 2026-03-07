@@ -94,6 +94,10 @@ const BOT_RATE_LIMIT_DEFAULT_WINDOW_MS = 60 * 1_000;
 const BOT_RATE_LIMIT_DEFAULT_MAX_REQUESTS = 8;
 const CHAT_QUEUE_MAX_LENGTH = 20;
 const CLEAN_CHAT_SCAN_MULTIPLIER = 4;
+const EXTRACT_DEFAULT_TIMEOUT_PER_PAGE_MS = 90_000;
+const EXTRACT_DEFAULT_TIMEOUT_BASE_MS = 30_000;
+const EXTRACT_DEFAULT_TIMEOUT_MAX_MS = 30 * 60 * 1_000;
+const BOT_RESTART_EXIT_DELAY_MS = 250;
 
 const BotConfigSchema = z.object({
   token: z.string().min(10),
@@ -113,6 +117,12 @@ type PendingSubtitleSelection = {
 
 type JobCancelToken = {
   isCancelled: () => boolean;
+  signal: AbortSignal;
+};
+
+type JobCancelRef = {
+  cancelled: boolean;
+  abortController: AbortController;
 };
 
 type ChatJob = {
@@ -124,7 +134,7 @@ type ChatJob = {
 
 type ChatQueueState = {
   running: ChatJob | null;
-  runningCancelRef: { cancelled: boolean } | null;
+  runningCancelRef: JobCancelRef | null;
   queue: ChatJob[];
   startedAt: number;
 };
@@ -372,6 +382,49 @@ function readPositiveIntEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+function resolveExtractJobTimeoutMs(maxPages: number): number {
+  const configured = readPositiveIntEnv("EXTRACT_BOT_JOB_TIMEOUT_MS", 0);
+  if (configured > 0) {
+    return configured;
+  }
+
+  const estimated =
+    EXTRACT_DEFAULT_TIMEOUT_BASE_MS +
+    Math.max(1, maxPages) * EXTRACT_DEFAULT_TIMEOUT_PER_PAGE_MS;
+  return Math.min(estimated, EXTRACT_DEFAULT_TIMEOUT_MAX_MS);
+}
+
+function createTimedAbortSignal(
+  timeoutMs: number,
+  baseSignal: AbortSignal,
+): { signal: AbortSignal; cleanup: () => void; didTimeout: () => boolean } {
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort(new Error(`Job timeout (${timeoutMs}ms)`));
+  }, timeoutMs);
+
+  const onBaseAbort = (): void => {
+    controller.abort(baseSignal.reason ?? new Error("Aborted"));
+  };
+
+  if (baseSignal.aborted) {
+    onBaseAbort();
+  } else {
+    baseSignal.addEventListener("abort", onBaseAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      baseSignal.removeEventListener("abort", onBaseAbort);
+    },
+    didTimeout: () => didTimeout,
+  };
+}
+
 function buildExtractCacheKey(url: string, maxPages: number): string {
   try {
     const normalized = new URL(url).toString();
@@ -467,6 +520,7 @@ function isCommandRateLimited(
   if (
     command.kind === "help" ||
     command.kind === "cancel" ||
+    command.kind === "restart" ||
     command.kind === "stats" ||
     command.kind === "clearCache" ||
     command.kind === "cleanOutput" ||
@@ -505,6 +559,10 @@ function buildHelpMessage(): string {
     "  Cek versi yt-dlp atau update manual lewat bot.",
     "• /cancel",
     "  Batalkan job aktif (best effort) dan hapus antrian chat ini.",
+    "• /stop",
+    "  Alias cepat dari /cancel.",
+    "• /restart",
+    "  Restart proses bot (disarankan jalankan bot via PM2/systemd).",
     "• /stats",
     "  Lihat status bot: queue, cache, memory, rate-limit.",
     "",
@@ -589,6 +647,10 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "cancel",
       description: "Batalkan job aktif dan antrian chat ini",
+    },
+    {
+      command: "restart",
+      description: "Restart proses bot (butuh process manager)",
     },
     {
       command: "stats",
@@ -686,6 +748,8 @@ function buildUnknownCommandMessage(input: string): string {
     "• /ytdlp status",
     "• /ytdlp update",
     "• /cancel",
+    "• /stop",
+    "• /restart",
     "• /stats",
     "• /clearcache",
     "• /cleanoutput all",
@@ -1501,7 +1565,10 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
       return;
     }
 
-    const cancelRef = { cancelled: false };
+    const cancelRef: JobCancelRef = {
+      cancelled: false,
+      abortController: new AbortController(),
+    };
     state.running = nextJob;
     state.runningCancelRef = cancelRef;
     state.startedAt = Date.now();
@@ -1520,6 +1587,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
           async () =>
             nextJob.run({
               isCancelled: () => cancelRef.cancelled,
+              signal: cancelRef.abortController.signal,
             }),
         );
       } catch (error) {
@@ -1605,6 +1673,9 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
     const runningCancelled = Boolean(state.running && state.runningCancelRef);
     if (state.runningCancelRef) {
       state.runningCancelRef.cancelled = true;
+      state.runningCancelRef.abortController.abort(
+        new Error("Cancelled from /cancel command"),
+      );
     }
     const runningLabel = state.running?.label ?? "-";
 
@@ -2013,6 +2084,33 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 { label: "Antrian dihapus", value: cancelled.queuedCleared },
               ]),
             );
+            continue;
+          }
+
+          if (command.kind === "restart") {
+            const cancelled = cancelChatJobs(chatId);
+            await api.sendMessage(
+              chatId,
+              buildStatusCard(
+                "🔁 Restart bot",
+                [
+                  {
+                    label: "Running dibatalkan",
+                    value: cancelled.runningCancelled ? "YA" : "TIDAK",
+                  },
+                  { label: "Antrian dihapus", value: cancelled.queuedCleared },
+                ],
+                "Bot akan restart sekarang. Gunakan PM2/systemd/docker restart policy agar bot otomatis hidup lagi.",
+              ),
+            );
+            await logger.warn("restart requested from telegram", {
+              chatId,
+              runningCancelled: cancelled.runningCancelled,
+              queuedCleared: cancelled.queuedCleared,
+            });
+            setTimeout(() => {
+              process.exit(0);
+            }, BOT_RESTART_EXIT_DELAY_MS);
             continue;
           }
 
@@ -2729,6 +2827,13 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   command.maxPages,
                 );
                 const extractStartedAt = Date.now();
+                const extractTimeoutMs = resolveExtractJobTimeoutMs(
+                  command.maxPages,
+                );
+                const timedCancel = createTimedAbortSignal(
+                  extractTimeoutMs,
+                  cancelToken.signal,
+                );
                 let lastStatusText = "";
                 let lastStatusAt = 0;
                 let liveStatusText = "";
@@ -2911,6 +3016,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                       {
                         includePagesInResponse: false,
                         shouldCancel: () => cancelToken.isCancelled(),
+                        signal: timedCancel.signal,
                         onProgress: async (progress) => {
                           const statusMap: Record<string, string> = {
                             init: "⏳ [1/5] Menyiapkan proses",
@@ -2943,6 +3049,29 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                         statusMessageId,
                         "🛑 Job extract dibatalkan.",
                       );
+                      return;
+                    }
+                    if (timedCancel.didTimeout()) {
+                      await safeStatusUpdate(
+                        statusMessageId,
+                        buildStatusCard("⏱️ Job extract dihentikan (timeout)", [
+                          {
+                            label: "Batas waktu",
+                            value: `${Math.round(extractTimeoutMs / 1000)}s`,
+                          },
+                          {
+                            label: "Aksi",
+                            value:
+                              "Coba /stop lalu ulangi dengan maxPages lebih kecil.",
+                          },
+                        ]),
+                      );
+                      await logger.warn("extract timeout", {
+                        chatId,
+                        url: command.url,
+                        maxPages: command.maxPages,
+                        timeoutMs: extractTimeoutMs,
+                      });
                       return;
                     }
                     throw error;
@@ -3099,6 +3228,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                     durationMs: Date.now() - extractStartedAt,
                   });
                 } finally {
+                  timedCancel.cleanup();
                   clearInterval(heartbeat);
                 }
               },

@@ -1,3 +1,5 @@
+import type { BrowserContext } from "playwright";
+
 function shouldEnableBrowserFallback(): boolean {
   return process.env.EXTRACT_BROWSER_FALLBACK === "1";
 }
@@ -18,6 +20,76 @@ function getWaitTimeoutMs(): number {
   }
 
   return Math.floor(raw);
+}
+
+const BROWSER_LAUNCH_TIMEOUT_MS = 45_000;
+const BROWSER_STEP_TIMEOUT_MS = 12_000;
+const BROWSER_CLOSE_TIMEOUT_MS = 8_000;
+
+function isCancellationError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      error.name === "AbortError" ||
+      message.includes("cancelled by user") ||
+      message.includes("aborted")
+    );
+  }
+  return false;
+}
+
+async function runWithTimeoutAndSignal<T>(
+  run: () => Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) {
+    throw new Error("Extraction cancelled by user");
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+
+    const finalize = (onDone: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      onDone();
+    };
+
+    const onAbort = (): void => {
+      finalize(() => reject(new Error("Extraction cancelled by user")));
+    };
+
+    const timer = setTimeout(() => {
+      finalize(() => reject(new Error(`Operation timeout (${timeoutMs}ms)`)));
+    }, timeoutMs);
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    void run().then(
+      (value) => finalize(() => resolve(value)),
+      (error) => finalize(() => reject(error)),
+    );
+  });
+}
+
+async function closeContextSafely(context: BrowserContext | null) {
+  if (!context) {
+    return;
+  }
+
+  await runWithTimeoutAndSignal(
+    () => context.close(),
+    BROWSER_CLOSE_TIMEOUT_MS,
+  ).catch(() => {});
 }
 
 function toUserDataDir(hostname: string): string {
@@ -119,9 +191,11 @@ export async function fetchBrowserFallbackHtml(
   url: string,
   options?: {
     force?: boolean;
+    signal?: AbortSignal;
   },
 ): Promise<string | null> {
   const force = options?.force ?? false;
+  const signal = options?.signal;
   if (!shouldEnableBrowserFallback() && !force) {
     return null;
   }
@@ -137,16 +211,32 @@ export async function fetchBrowserFallbackHtml(
   const headless = isHeadless();
   const waitTimeoutMs = getWaitTimeoutMs();
   const userDataDir = toUserDataDir(parsed.hostname);
-
-  const context = await playwrightModule.chromium.launchPersistentContext(
-    userDataDir,
-    {
-      headless,
-      viewport: { width: 1366, height: 900 },
-    },
-  );
+  let context: BrowserContext | null = null;
+  let onAbortClose: (() => void) | null = null;
 
   try {
+    context = await runWithTimeoutAndSignal(
+      () =>
+        playwrightModule.chromium.launchPersistentContext(userDataDir, {
+          headless,
+          viewport: { width: 1366, height: 900 },
+        }),
+      BROWSER_LAUNCH_TIMEOUT_MS,
+      signal,
+    );
+
+    if (signal) {
+      onAbortClose = () => {
+        void closeContextSafely(context);
+      };
+      signal.addEventListener("abort", onAbortClose, { once: true });
+    }
+
+    if (!context) {
+      return null;
+    }
+    const activeContext = context;
+
     const cookieHeader = readCookieOverride(url);
     if (cookieHeader) {
       const cookies = parseCookieHeaderToBrowserCookies(
@@ -154,25 +244,52 @@ export async function fetchBrowserFallbackHtml(
         parsed.hostname,
       );
       if (cookies.length > 0) {
-        await context.addCookies(cookies);
+        await runWithTimeoutAndSignal(
+          () => activeContext.addCookies(cookies),
+          BROWSER_STEP_TIMEOUT_MS,
+          signal,
+        );
       }
     }
 
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 45_000,
-    });
+    const page =
+      activeContext.pages()[0] ??
+      (await runWithTimeoutAndSignal(
+        () => activeContext.newPage(),
+        BROWSER_STEP_TIMEOUT_MS,
+        signal,
+      ));
+    await runWithTimeoutAndSignal(
+      () =>
+        page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 45_000,
+        }),
+      55_000,
+      signal,
+    );
 
     const startedAt = Date.now();
-    let html = await page.content();
+    let html = await runWithTimeoutAndSignal(
+      () => page.content(),
+      BROWSER_STEP_TIMEOUT_MS,
+      signal,
+    );
 
     while (
       looksLikeChallengePage(html) &&
       Date.now() - startedAt < waitTimeoutMs
     ) {
-      await page.waitForTimeout(1_500);
-      html = await page.content();
+      await runWithTimeoutAndSignal(
+        () => page.waitForTimeout(1_500),
+        BROWSER_STEP_TIMEOUT_MS,
+        signal,
+      );
+      html = await runWithTimeoutAndSignal(
+        () => page.content(),
+        BROWSER_STEP_TIMEOUT_MS,
+        signal,
+      );
     }
 
     if (looksLikeChallengePage(html)) {
@@ -180,9 +297,15 @@ export async function fetchBrowserFallbackHtml(
     }
 
     return html;
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isCancellationError(error)) {
+      throw new Error("Extraction cancelled by user");
+    }
     return null;
   } finally {
-    await context.close();
+    if (signal && onAbortClose) {
+      signal.removeEventListener("abort", onAbortClose);
+    }
+    await closeContextSafely(context);
   }
 }

@@ -301,6 +301,18 @@ describe("parseTelegramCommand", () => {
     expect(parsed.kind).toBe("cancel");
   });
 
+  test("parses /stop command as cancel alias", () => {
+    const parsed = parseTelegramCommand("/stop");
+
+    expect(parsed.kind).toBe("cancel");
+  });
+
+  test("parses /restart command", () => {
+    const parsed = parseTelegramCommand("/restart");
+
+    expect(parsed.kind).toBe("restart");
+  });
+
   test("parses /stats command", () => {
     const parsed = parseTelegramCommand("/stats");
 

@@ -34,6 +34,7 @@ export type ExtractOptions = {
   onProgress?: (progress: ExtractionProgress) => Promise<void> | void;
   includePagesInResponse?: boolean;
   shouldCancel?: () => boolean;
+  signal?: AbortSignal;
 };
 
 export type ExtractResponse = {
@@ -289,7 +290,7 @@ export async function runExtraction(
 ): Promise<ExtractResponse> {
   const includePagesInResponse = options?.includePagesInResponse ?? true;
   const throwIfCancelled = (): void => {
-    if (options?.shouldCancel?.()) {
+    if (options?.shouldCancel?.() || options?.signal?.aborted) {
       throw new Error("Extraction cancelled by user");
     }
   };
@@ -310,6 +311,7 @@ export async function runExtraction(
   await report("crawl", "Mengambil dan memproses konten halaman");
   const result = await crawlCheerioDocs(request.rootUrl, request.maxPages, {
     shouldCancel: options?.shouldCancel,
+    signal: options?.signal,
     onProgress: async (progress) => {
       const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
       await report(
