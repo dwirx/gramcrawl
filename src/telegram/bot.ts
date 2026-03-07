@@ -540,6 +540,8 @@ function buildHelpMessage(): string {
     "Perintah utama:",
     "• /extract <url> [maxPages]",
     "  Ekstrak website ke JSON + Markdown + TXT (maxPages 1-30).",
+    "• /archive <url> [maxPages]",
+    "  Bisa pakai URL biasa atau archive.is/archive.today/archive.ph.",
     "• /scribd <url-scribd>",
     "  Shortcut extract 1 halaman khusus Scribd.",
     "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
@@ -598,6 +600,10 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "extract",
       description: "Ekstrak halaman web: /extract <url> [maxPages]",
+    },
+    {
+      command: "archive",
+      description: "Extract mode archive: /archive <url> [maxPages]",
     },
     {
       command: "scribd",
@@ -738,6 +744,8 @@ function buildUnknownCommandMessage(input: string): string {
     "",
     "Contoh yang benar:",
     "• /extract https://example.com/artikel 1",
+    "• /archive https://archive.is/xxxxx/https://example.com/artikel 1",
+    "• /archive https://www.nytimes.com/...?... 1",
     "• /scribd https://www.scribd.com/document/123456789/judul",
     "• /subtitle https://www.youtube.com/watch?v=xxxx",
     "• /mark https://si.inc/posts/fdm1/",
@@ -1147,6 +1155,84 @@ function buildSendFileName(path: string, fallbackBaseName: string): string {
   return `${articleSlug}.${ext}`;
 }
 
+function sanitizeDocumentBaseName(value: string): string {
+  const normalized = value
+    .normalize("NFKD")
+    .replaceAll(/[\u0300-\u036f]/g, "")
+    .replaceAll(/[\\/:*?"<>|]+/g, " ")
+    .replaceAll(/\s+/g, " ")
+    .trim();
+  const truncated = normalized.slice(0, 120).trim();
+  return truncated || "document";
+}
+
+async function readArticleTitleFromLatestJson(
+  path: string,
+): Promise<string | null> {
+  const normalized = path.replaceAll("\\", "/");
+  const parts = normalized.split("/").filter(Boolean);
+  const baseName = parts.at(-1) ?? "";
+
+  if (!baseName.startsWith("latest.")) {
+    return null;
+  }
+
+  const slashIndex = normalized.lastIndexOf("/");
+  if (slashIndex < 0) {
+    return null;
+  }
+
+  const latestJsonPath = `${normalized.slice(0, slashIndex)}/latest.json`;
+  const latestJsonFile = Bun.file(latestJsonPath);
+  if (!(await latestJsonFile.exists())) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(await latestJsonFile.text()) as {
+      articleTitle?: unknown;
+      title?: unknown;
+    };
+    const rawTitle =
+      typeof parsed.articleTitle === "string"
+        ? parsed.articleTitle
+        : typeof parsed.title === "string"
+          ? parsed.title
+          : "";
+    if (!rawTitle.trim()) {
+      return null;
+    }
+
+    return sanitizeDocumentBaseName(rawTitle);
+  } catch {
+    return null;
+  }
+}
+
+export async function buildSendFileNameForExtract(
+  path: string,
+  fallbackBaseName: string,
+): Promise<string> {
+  const defaultName = buildSendFileName(path, fallbackBaseName);
+  const normalized = path.replaceAll("\\", "/");
+  const parts = normalized.split("/").filter(Boolean);
+  const baseName = parts.at(-1) ?? "";
+
+  if (!baseName.startsWith("latest.")) {
+    return defaultName;
+  }
+
+  const ext = baseName.includes(".")
+    ? (baseName.split(".").at(-1) ?? "txt")
+    : "txt";
+  const articleTitle = await readArticleTitleFromLatestJson(path);
+  if (!articleTitle) {
+    return defaultName;
+  }
+
+  return `${articleTitle}.${ext}`;
+}
+
 function isScribdSite(site: string): boolean {
   const normalized = site.toLowerCase();
   return normalized === "scribd.com" || normalized.endsWith(".scribd.com");
@@ -1413,7 +1499,10 @@ async function sendFilesBatch(
     );
     await api.sendChatAction(chatId, "upload_document");
     try {
-      const sendFileName = buildSendFileName(path, title.toLowerCase());
+      const sendFileName = await buildSendFileNameForExtract(
+        path,
+        title.toLowerCase(),
+      );
       await api.sendDocument(
         chatId,
         path,

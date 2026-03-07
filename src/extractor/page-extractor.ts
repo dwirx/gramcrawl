@@ -1,4 +1,5 @@
 import type { ContentBlock, ExtractedPage } from "./types";
+import { unwrapArchiveProxyUrl } from "./archive-utils";
 import { collectImagesFromBlocks } from "./image-utils";
 import { extractStructuredArticleFromJsonLd } from "./structured-data";
 import { normalizeScopedUrl } from "./url-utils";
@@ -253,11 +254,11 @@ function normalizeInlineHref(
 ): string {
   const scoped = normalizeScopedUrl(href, currentPageUrl, rootUrl);
   if (scoped) {
-    return scoped;
+    return unwrapArchiveProxyUrl(scoped);
   }
 
   try {
-    return new URL(href, currentPageUrl).toString();
+    return unwrapArchiveProxyUrl(new URL(href, currentPageUrl).toString());
   } catch {
     return href;
   }
@@ -461,7 +462,7 @@ export function extractPageFromHtml(
     const normalized = normalizeScopedUrl(href, currentPageUrl, rootUrl);
 
     if (normalized) {
-      links.push(normalized);
+      links.push(unwrapArchiveProxyUrl(normalized));
     }
   });
 

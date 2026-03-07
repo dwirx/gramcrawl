@@ -11,6 +11,7 @@ Proyek ini fokus ke:
 ## ✨ Fitur Utama
 
 - 🌐 **Web Extractor**: ambil konten halaman jadi `JSON`, `Markdown`, `TXT`
+- 🧠 **Multi-Engine Parsing**: `Cheerio` (utama) → `JSDOM + Readability` (fallback lokal) → rendered/browser fallback untuk kasus sulit
 - 📚 **Mode Scribd**: shortcut ekstraksi 1 halaman + export tambahan
 - 🎬 **YouTube Subtitle**: list bahasa subtitle, download, dan konversi
 - 🍪 **Cookie Management**: import cookies Netscape/JSON ke `.env`
@@ -135,6 +136,7 @@ bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
 - `/start` atau `/menu` → tampilkan menu utama
 - `/help` → bantuan lengkap
 - `/extract <url> [maxPages]` → extract website
+- `/archive <url> [maxPages]` → extract URL biasa atau link archive (archive.is/archive.today/archive.ph)
 - `/scribd <url-scribd>` → extract Scribd 1 halaman
 - `/subtitle <url-youtube>` → pilih bahasa subtitle via tombol
 - `/mark <url>` atau `/md <url>` → convert URL ke Markdown
@@ -145,6 +147,8 @@ bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
 - `/cookieimport <domain>` → import cookie dari file upload
 - `/cookieset <domain> <cookie-header>` → set cookie manual
 - `/cancel` → batalkan job aktif (best effort) + hapus antrian chat
+- `/stop` → alias cepat dari `/cancel`
+- `/restart` → restart proses bot (butuh PM2/systemd/docker restart policy)
 - `/stats` → status runtime (queue/cache/memory/rate-limit)
 - `/clearcache` → bersihkan cache runtime bot
 - `/cleanoutput <all|site>` → hapus output untuk semua site / site tertentu

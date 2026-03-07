@@ -166,6 +166,14 @@ describe("buildSiteFolderName", () => {
       ),
     ).toBe("www.theverge.com");
   });
+
+  test("uses original hostname for archive snapshot url", () => {
+    expect(
+      buildSiteFolderName(
+        "https://archive.is/20260305202935/https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html",
+      ),
+    ).toBe("www.nytimes.com");
+  });
 });
 
 describe("normalizeScopedUrl", () => {
@@ -294,6 +302,185 @@ describe("markdown helpers", () => {
     expect(markdown).toContain(
       "| Session start | ~15,540 | ~300   | 98%     |",
     );
+  });
+
+  test("buildMarkdownFromBlocks filters archive toolbar noise", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "text",
+        tag: "table",
+        text: "| archive.todaywebpage capture | Saved from | history←priornext→ |",
+      },
+      { type: "text", tag: "p", text: "Paragraf konten utama." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).not.toContain("archive.todaywebpage capture");
+    expect(markdown).toContain("Paragraf konten utama.");
+  });
+
+  test("buildMarkdownFromBlocks filters archive history row noise", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "text",
+        tag: "table",
+        text: "| history←priornext→ |  |",
+      },
+      { type: "text", tag: "p", text: "Konten tetap ada." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).not.toContain("history←priornext→");
+    expect(markdown).toContain("Konten tetap ada.");
+  });
+
+  test("buildMarkdownFromBlocks stops at related content section heading", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "p", text: "Paragraf utama satu." },
+      { type: "text", tag: "h2", text: "Related Content" },
+      { type: "text", tag: "p", text: "Paragraf sidebar yang harus dibuang." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain("Paragraf utama satu.");
+    expect(markdown).not.toContain("Related Content");
+    expect(markdown).not.toContain("Paragraf sidebar yang harus dibuang.");
+  });
+
+  test("buildMarkdownFromBlocks removes advertisement and blocked host noise", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "p", text: "Advertisement" },
+      { type: "text", tag: "h2", text: "static01.nyt.com is blocked" },
+      { type: "text", tag: "p", text: "Isi utama tetap ada." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain("Isi utama tetap ada.");
+    expect(markdown).not.toContain("Advertisement");
+    expect(markdown).not.toContain("static01.nyt.com is blocked");
+  });
+
+  test("buildMarkdownFromBlocks skips editors picks section but keeps next h2", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "h2", text: "Editors’ Picks" },
+      { type: "text", tag: "h3", text: "Judul promo 1" },
+      { type: "text", tag: "p", text: "Isi promo yang harus dibuang." },
+      { type: "text", tag: "h2", text: "More on the Assault on Iran" },
+      { type: "text", tag: "p", text: "Isi section relevan tetap tampil." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).not.toContain("Editors’ Picks");
+    expect(markdown).not.toContain("Judul promo 1");
+    expect(markdown).not.toContain("Isi promo yang harus dibuang.");
+    expect(markdown).toContain("## More on the Assault on Iran");
+    expect(markdown).toContain("Isi section relevan tetap tampil.");
+  });
+
+  test("buildMarkdownFromBlocks trims long leading image-only noise", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "image",
+        src: "https://example.com/1.jpg",
+        alt: "img",
+        caption: "",
+      },
+      {
+        type: "image",
+        src: "https://example.com/2.jpg",
+        alt: "img",
+        caption: "",
+      },
+      {
+        type: "image",
+        src: "https://example.com/3.jpg",
+        alt: "img",
+        caption: "",
+      },
+      {
+        type: "image",
+        src: "https://example.com/4.jpg",
+        alt: "img",
+        caption: "",
+      },
+      { type: "text", tag: "p", text: "Isi utama artikel dimulai di sini." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain("Isi utama artikel dimulai di sini.");
+    expect(markdown).not.toContain("https://example.com/1.jpg");
+    expect(markdown).not.toContain("https://example.com/2.jpg");
+    expect(markdown).not.toContain("https://example.com/3.jpg");
+    expect(markdown).not.toContain("https://example.com/4.jpg");
+  });
+
+  test("buildMarkdownFromBlocks trims image run before first narrative text", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", tag: "h2", text: "Judul Section" },
+      {
+        type: "image",
+        src: "https://example.com/a.jpg",
+        alt: "img",
+        caption: "",
+      },
+      {
+        type: "image",
+        src: "https://example.com/b.jpg",
+        alt: "img",
+        caption: "",
+      },
+      {
+        type: "image",
+        src: "https://example.com/c.jpg",
+        alt: "img",
+        caption: "",
+      },
+      { type: "text", tag: "p", text: "Paragraf naratif pertama." },
+    ];
+
+    const markdown = buildMarkdownFromBlocks(blocks);
+
+    expect(markdown).toContain("## Judul Section");
+    expect(markdown).toContain("Paragraf naratif pertama.");
+    expect(markdown).not.toContain("https://example.com/a.jpg");
+    expect(markdown).not.toContain("https://example.com/b.jpg");
+    expect(markdown).not.toContain("https://example.com/c.jpg");
+  });
+
+  test("buildArticleText skips archive toolbar screenshot image", () => {
+    const textOutput = buildArticleText(
+      {
+        url: "https://archive.is/abc/https://example.com/x",
+        articleTitle: "Contoh Artikel",
+        description: "",
+        articleBodyText: "Isi utama.",
+        contentBlocks: [
+          {
+            type: "image",
+            src: "https://archive.is/abc/e50efde97512dae673ab464cf4d8e57946159199/scr.png",
+            alt: "img",
+            caption: "",
+          },
+          {
+            type: "image",
+            src: "https://archive.is/abc/real-photo.webp",
+            alt: "foto",
+            caption: "",
+          },
+        ],
+        publishedAt: "2026-03-05T00:00:00.000Z",
+      },
+      "2026-03-07T00:00:00.000Z",
+    );
+
+    expect(textOutput).not.toContain("/scr.png");
+    expect(textOutput).toContain("real-photo.webp");
   });
 
   test("buildArticleText returns plain text output", () => {

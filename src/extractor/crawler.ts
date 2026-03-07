@@ -2,8 +2,10 @@ import {
   fetchBrowserFallbackHtml,
   isBrowserFallbackForced,
 } from "./browser-fallback";
+import { extractArchiveOriginalUrl } from "./archive-utils";
 import { loadCheerioModule } from "./cheerio-loader";
 import { collectImagesFromBlocks } from "./image-utils";
+import { extractPageWithJsdomFallback } from "./jsdom-fallback";
 import { extractPageFromHtml } from "./page-extractor";
 import {
   fetchRenderedFallbackArticle,
@@ -306,6 +308,8 @@ export async function crawlCheerioDocs(
   maxPages: number,
   options?: CrawlOptions,
 ): Promise<ExtractionResult> {
+  const archiveOriginalRootUrl = extractArchiveOriginalUrl(rootUrl);
+  const disableQueueForArchiveSnapshot = Boolean(archiveOriginalRootUrl);
   const scopedRootUrl = new URL(rootUrl);
   const queueLimit = Math.max(
     maxPages * QUEUE_LIMIT_MULTIPLIER,
@@ -341,12 +345,19 @@ export async function crawlCheerioDocs(
 
     try {
       throwIfCancelled(options);
-      const html = await fetchHtml(currentUrl, options?.signal);
       let extracted: ExtractedPage | null = null;
-      const forceBrowser =
-        isBrowserFallbackForced() || shouldAutoBrowserFallback(currentUrl);
+      const forceBrowser = isBrowserFallbackForced();
+      const autoBrowserFallback = shouldAutoBrowserFallback(currentUrl);
 
       if (forceBrowser) {
+        await options?.onProgress?.({
+          step: "page-start",
+          url: currentUrl,
+          crawledPages: pages.length,
+          queueLength: queue.length,
+          maxPages,
+          message: `Browser fallback dipaksa untuk: ${currentUrl}`,
+        });
         const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
           force: true,
           signal: options?.signal,
@@ -366,6 +377,9 @@ export async function crawlCheerioDocs(
         }
       }
 
+      const html = extracted
+        ? null
+        : await fetchHtml(currentUrl, options?.signal);
       if (!extracted && html) {
         extracted = extractPageFromHtml(
           currentUrl,
@@ -373,6 +387,40 @@ export async function crawlCheerioDocs(
           scopedRootUrl,
           cheerio.load,
         );
+      }
+
+      if (
+        html &&
+        (!extracted ||
+          looksLikeBlockedPage(extracted) ||
+          looksLikeUnreadableExtraction(extracted) ||
+          extracted.articleBodyText.length < 160)
+      ) {
+        await options?.onProgress?.({
+          step: "page-start",
+          url: currentUrl,
+          crawledPages: pages.length,
+          queueLength: queue.length,
+          maxPages,
+          message: `Fallback JSDOM/Readability untuk: ${currentUrl}`,
+        });
+        const jsdomExtracted = extractPageWithJsdomFallback(
+          currentUrl,
+          html,
+          scopedRootUrl,
+        );
+
+        if (jsdomExtracted && !looksLikeBlockedPage(jsdomExtracted)) {
+          if (
+            !extracted ||
+            looksLikeBlockedPage(extracted) ||
+            looksLikeUnreadableExtraction(extracted) ||
+            jsdomExtracted.articleBodyText.length >
+              extracted.articleBodyText.length
+          ) {
+            extracted = jsdomExtracted;
+          }
+        }
       }
 
       const blockedByChallenge = extracted
@@ -384,6 +432,14 @@ export async function crawlCheerioDocs(
         extracted.articleBodyText.length < 160 ||
         blockedByChallenge
       ) {
+        await options?.onProgress?.({
+          step: "page-start",
+          url: currentUrl,
+          crawledPages: pages.length,
+          queueLength: queue.length,
+          maxPages,
+          message: `Fallback konten ter-render untuk: ${currentUrl}`,
+        });
         const fallback = await fetchRenderedFallbackArticle(currentUrl, {
           signal: options?.signal,
         });
@@ -435,8 +491,24 @@ export async function crawlCheerioDocs(
         }
       }
 
-      if (!extracted || looksLikeBlockedPage(extracted)) {
+      if (
+        !extracted ||
+        looksLikeBlockedPage(extracted) ||
+        looksLikeUnreadableExtraction(extracted)
+      ) {
+        const browserForce = forceBrowser || autoBrowserFallback;
+        await options?.onProgress?.({
+          step: "page-start",
+          url: currentUrl,
+          crawledPages: pages.length,
+          queueLength: queue.length,
+          maxPages,
+          message: browserForce
+            ? `Fallback browser otomatis untuk: ${currentUrl}`
+            : `Fallback browser opsional untuk: ${currentUrl}`,
+        });
         const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
+          force: browserForce,
           signal: options?.signal,
         });
 
@@ -465,6 +537,13 @@ export async function crawlCheerioDocs(
         throw buildBlockedError(currentUrl);
       }
 
+      if (disableQueueForArchiveSnapshot) {
+        const originalCurrentUrl = extractArchiveOriginalUrl(currentUrl);
+        if (originalCurrentUrl) {
+          extracted.url = originalCurrentUrl;
+        }
+      }
+
       pages.push(extracted);
       await options?.onProgress?.({
         step: "page-done",
@@ -474,6 +553,10 @@ export async function crawlCheerioDocs(
         maxPages,
         message: `Berhasil: ${pages.length}/${maxPages} halaman`,
       });
+
+      if (disableQueueForArchiveSnapshot) {
+        continue;
+      }
 
       let scannedLinks = 0;
       for (const link of extracted.links) {
@@ -517,7 +600,7 @@ export async function crawlCheerioDocs(
   }
 
   return {
-    rootUrl: scopedRootUrl.toString(),
+    rootUrl: archiveOriginalRootUrl ?? scopedRootUrl.toString(),
     maxPages,
     crawledPages: pages.length,
     collectedAt: new Date().toISOString(),

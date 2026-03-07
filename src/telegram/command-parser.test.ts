@@ -197,6 +197,54 @@ describe("parseTelegramCommand", () => {
     expect(parsed.maxPages).toBe(30);
   });
 
+  test("parses /archive command as extract", () => {
+    const parsed = parseTelegramCommand(
+      "/archive https://archive.is/20260305202935/https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html 3",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.url).toBe(
+      "https://archive.is/20260305202935/https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html",
+    );
+    expect(parsed.maxPages).toBe(3);
+  });
+
+  test("parses /archive with bot mention", () => {
+    const parsed = parseTelegramCommand(
+      "/archive@teleextract_bot https://archive.is/o/abc/https://www.nytimes.com/world",
+    );
+
+    expect(parsed.kind).toBe("extract");
+  });
+
+  test("parses /archive for regular url", () => {
+    const parsed = parseTelegramCommand(
+      "/archive https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html",
+    );
+
+    expect(parsed.kind).toBe("extract");
+  });
+
+  test("parses /archive with query string url", () => {
+    const parsed = parseTelegramCommand(
+      "/archive https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html?unlocked_article_code=1.Q1A.iDYk.Q91DlPE9JfKc&smid=url-share 1",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.url).toBe(
+      "https://www.nytimes.com/2026/03/05/world/middleeast/iran-school-us-strikes-naval-base.html?unlocked_article_code=1.Q1A.iDYk.Q91DlPE9JfKc&smid=url-share",
+    );
+    expect(parsed.maxPages).toBe(1);
+  });
+
   test("parses command names case-insensitively", () => {
     const parsed = parseTelegramCommand(
       "/EXTRACT https://example.com/article 2",

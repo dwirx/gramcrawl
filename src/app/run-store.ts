@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { extractArchiveOriginalUrl } from "../extractor/archive-utils";
 
 export type RunManifestItem = {
   id: string;
@@ -23,7 +24,8 @@ export function buildRunId(now: Date = new Date()): string {
 
 export function buildSiteFolderName(rootUrl: string): string {
   try {
-    const hostname = new URL(rootUrl).hostname.toLowerCase();
+    const resolvedRootUrl = extractArchiveOriginalUrl(rootUrl) ?? rootUrl;
+    const hostname = new URL(resolvedRootUrl).hostname.toLowerCase();
     return hostname.replaceAll(/[^a-z0-9.-]/g, "-") || "unknown-site";
   } catch {
     return "unknown-site";

@@ -118,6 +118,24 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
+  if (command === "/archive") {
+    const url = parts[1];
+
+    if (!url || !isUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "extract",
+      url,
+      maxPages: toBoundedPositiveInt(
+        parts[2],
+        DEFAULT_EXTRACT_MAX_PAGES,
+        MAX_EXTRACT_MAX_PAGES,
+      ),
+    };
+  }
+
   if (command === "/scribd") {
     const url = parts[1];
 

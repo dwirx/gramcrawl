@@ -26,6 +26,7 @@ const UI_NOISE_TEXTS = new Set([
   "search search",
   "jadi kawan m",
   "proyeksengsaranasional",
+  "share full article",
   "topics",
   "sections",
   "more",
@@ -43,6 +44,19 @@ const STOP_MARKERS = [
   "see all",
   "berikut sebaran masalahnya",
   "related stories",
+];
+
+const SECTION_STOP_MARKERS = [
+  "related content",
+  "site index",
+  "site information navigation",
+];
+
+const SECTION_SKIP_MARKERS = [
+  "editors picks",
+  "editors' picks",
+  "editors’ picks",
+  "trending in",
 ];
 
 const IMAGE_NOISE_SRC_MARKERS = [
@@ -281,6 +295,7 @@ function filterRenderableBlocks(blocks: ContentBlock[]): ContentBlock[] {
   const filtered: ContentBlock[] = [];
   let previousTextKey = "";
   let shouldStop = false;
+  let skipSectionHeadingLevel: number | null = null;
   const seenLongTextKeys = new Set<string>();
 
   for (const block of blocks) {
@@ -295,13 +310,34 @@ function filterRenderableBlocks(blocks: ContentBlock[]): ContentBlock[] {
       const text = isPreformatted
         ? block.text.replaceAll(/\r\n/g, "\n").trim()
         : normalizeWhitespace(block.text);
-      if (!text || isUiNoiseLine(text)) {
+      if (
+        !text ||
+        isUiNoiseLine(text) ||
+        isLikelyTruncatedHeading(normalizedTag, text) ||
+        (normalizedTag === "table" && isNoiseTableBlock(text))
+      ) {
         continue;
       }
 
       const key = normalizeForNoise(text);
+      if (skipSectionHeadingLevel !== null) {
+        const level = headingLevel(normalizedTag);
+        if (level === null || level > skipSectionHeadingLevel) {
+          continue;
+        }
+        skipSectionHeadingLevel = null;
+      }
+
       if (STOP_MARKERS.some((marker) => key.includes(marker))) {
         shouldStop = true;
+        continue;
+      }
+      if (shouldStopAtSection(normalizedTag, key)) {
+        shouldStop = true;
+        continue;
+      }
+      if (shouldSkipSection(normalizedTag, key)) {
+        skipSectionHeadingLevel = headingLevel(normalizedTag);
         continue;
       }
 
@@ -333,10 +369,62 @@ function filterRenderableBlocks(blocks: ContentBlock[]): ContentBlock[] {
     });
   }
 
-  return filtered;
+  return trimLeadingImageNoise(filtered);
+}
+
+function trimLeadingImageNoise(blocks: ContentBlock[]): ContentBlock[] {
+  const firstTextIndex = blocks.findIndex((block) => block.type === "text");
+  let trimmed = blocks;
+
+  if (firstTextIndex >= 3) {
+    const leading = blocks.slice(0, firstTextIndex);
+    if (leading.every((block) => block.type === "image")) {
+      trimmed = blocks.slice(firstTextIndex);
+    }
+  }
+
+  return trimImageRunBeforeFirstNarrative(trimmed);
+}
+
+function trimImageRunBeforeFirstNarrative(
+  blocks: ContentBlock[],
+): ContentBlock[] {
+  const firstNarrativeIndex = blocks.findIndex(
+    (block) =>
+      block.type === "text" &&
+      !/^h[1-6]$/.test(block.tag.toLowerCase()) &&
+      block.tag.toLowerCase() !== "hr" &&
+      block.tag.toLowerCase() !== "table",
+  );
+
+  if (firstNarrativeIndex <= 0) {
+    return blocks;
+  }
+
+  let imageCountBeforeNarrative = 0;
+  for (let i = 0; i < firstNarrativeIndex; i += 1) {
+    if (blocks[i]?.type === "image") {
+      imageCountBeforeNarrative += 1;
+    }
+  }
+
+  if (imageCountBeforeNarrative < 3) {
+    return blocks;
+  }
+
+  return blocks.filter(
+    (block, index) => !(index < firstNarrativeIndex && block.type === "image"),
+  );
 }
 
 function isUiNoiseLine(text: string): boolean {
+  if (
+    text.includes("history←priornext→") ||
+    text.includes("history<priornext>")
+  ) {
+    return true;
+  }
+
   const lowered = normalizeForNoise(text);
   if (UI_NOISE_TEXTS.has(lowered)) {
     return true;
@@ -351,6 +439,23 @@ function isUiNoiseLine(text: string): boolean {
   }
 
   if (lowered.includes("made with flourish")) {
+    return true;
+  }
+
+  if (
+    lowered.includes("archive.todaywebpage capture") ||
+    lowered.includes("history priornext") ||
+    lowered.includes("saved from history") ||
+    lowered.includes("saved from")
+  ) {
+    return true;
+  }
+
+  if (lowered === "advertisement" || lowered.startsWith("advertisement ")) {
+    return true;
+  }
+
+  if (/^[a-z0-9.-]+\s+is\s+blocked$/i.test(lowered)) {
     return true;
   }
 
@@ -387,6 +492,59 @@ function isUiNoiseLine(text: string): boolean {
   );
 }
 
+function shouldStopAtSection(tag: string, key: string): boolean {
+  if (!/^h[1-6]$/.test(tag)) {
+    return false;
+  }
+
+  return SECTION_STOP_MARKERS.some(
+    (marker) => key === marker || key.startsWith(`${marker} `),
+  );
+}
+
+function shouldSkipSection(tag: string, key: string): boolean {
+  if (!/^h[1-6]$/.test(tag)) {
+    return false;
+  }
+
+  return SECTION_SKIP_MARKERS.some(
+    (marker) => key === marker || key.startsWith(`${marker} `),
+  );
+}
+
+function headingLevel(tag: string): number | null {
+  if (!/^h[1-6]$/.test(tag)) {
+    return null;
+  }
+
+  return Number(tag[1] ?? "0");
+}
+
+function isLikelyTruncatedHeading(tag: string, text: string): boolean {
+  if (!/^h[1-6]$/.test(tag)) {
+    return false;
+  }
+
+  if (text.length < 24) {
+    return false;
+  }
+
+  return text.endsWith("…") || text.endsWith("...");
+}
+
+function isNoiseTableBlock(text: string): boolean {
+  const lowered = normalizeForNoise(text);
+
+  if (
+    lowered.includes("archive.todaywebpage capture") ||
+    lowered.includes("history priornext")
+  ) {
+    return true;
+  }
+
+  return /(^|\s)0%(\s|$)/.test(lowered) && /(^|\s)100%(\s|$)/.test(lowered);
+}
+
 function shouldSkipImageInOutput(
   srcValue: string,
   altValue: string,
@@ -405,6 +563,10 @@ function shouldSkipImageInOutput(
   }
 
   if (src.startsWith("data:image/")) {
+    return true;
+  }
+
+  if (src.includes("/scr.png")) {
     return true;
   }
 
