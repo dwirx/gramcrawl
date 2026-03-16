@@ -12,6 +12,13 @@ function isHeadless(): boolean {
   return process.env.EXTRACT_BROWSER_HEADLESS !== "0";
 }
 
+function getBrowserEngine(): "chromium" | "lightpanda" {
+  const engine = (process.env.EXTRACT_BROWSER_ENGINE ?? "chromium")
+    .trim()
+    .toLowerCase();
+  return engine === "lightpanda" ? "lightpanda" : "chromium";
+}
+
 function getWaitTimeoutMs(): number {
   const raw = Number(process.env.EXTRACT_BROWSER_WAIT_MS ?? "90000");
 
@@ -187,6 +194,30 @@ function parseCookieHeaderToBrowserCookies(
   return cookies;
 }
 
+async function fetchLightpandaHtml(
+  url: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  let lightpanda: typeof import("@lightpanda/browser").lightpanda;
+  try {
+    const module = await import("@lightpanda/browser");
+    lightpanda = module.lightpanda;
+  } catch {
+    return null;
+  }
+
+  return await runWithTimeoutAndSignal(
+    async () => {
+      const result = await lightpanda.fetch(url, {
+        dumpOptions: { type: "html" },
+      });
+      return typeof result === "string" ? result : result.toString();
+    },
+    BROWSER_LAUNCH_TIMEOUT_MS,
+    signal,
+  ).catch(() => null);
+}
+
 export async function fetchBrowserFallbackHtml(
   url: string,
   options?: {
@@ -198,6 +229,12 @@ export async function fetchBrowserFallbackHtml(
   const signal = options?.signal;
   if (!shouldEnableBrowserFallback() && !force) {
     return null;
+  }
+
+  const engine = getBrowserEngine();
+
+  if (engine === "lightpanda") {
+    return await fetchLightpandaHtml(url, signal);
   }
 
   let playwrightModule: typeof import("playwright");

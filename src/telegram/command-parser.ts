@@ -12,6 +12,8 @@ export type TelegramCommand =
   | { kind: "help" }
   | { kind: "runs"; limit: number }
   | { kind: "extract"; url: string; maxPages: number }
+  | { kind: "bloomberg"; url: string }
+  | { kind: "lightpanda"; url: string }
   | { kind: "mark"; url: string }
   | { kind: "defuddle"; url: string }
   | { kind: "subtitle"; url: string }
@@ -147,6 +149,32 @@ export function parseTelegramCommand(text: string): TelegramCommand {
       kind: "extract",
       url,
       maxPages: DEFAULT_EXTRACT_MAX_PAGES,
+    };
+  }
+
+  if (command === "/bloomberg") {
+    const url = parts[1];
+
+    if (!url || !isUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "bloomberg",
+      url,
+    };
+  }
+
+  if (command === "/lightpanda") {
+    const url = parts[1];
+
+    if (!url || !isUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "lightpanda",
+      url,
     };
   }
 

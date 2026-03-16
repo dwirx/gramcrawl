@@ -28,7 +28,7 @@ export type CrawlOptions = {
   signal?: AbortSignal;
 };
 
-const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com"];
+const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com", "bloomberg.com"];
 const QUEUE_LIMIT_MULTIPLIER = 25;
 const MIN_QUEUE_LIMIT = 60;
 const MAX_LINKS_SCANNED_PER_PAGE = 400;
@@ -205,6 +205,8 @@ function looksLikeBlockedPage(
     "just a moment",
     "security verification",
     "verify you are not a bot",
+    "are you a robot",
+    "unusual activity",
     "access denied",
     "forbidden",
     "captcha",
@@ -293,6 +295,74 @@ async function fetchMediumProviderHtml(
     }
 
     return await response.text();
+  } catch (error) {
+    if (externalSignal?.aborted || isCancellationError(error)) {
+      throw new Error("Extraction cancelled by user");
+    }
+    return null;
+  } finally {
+    cleanup();
+  }
+}
+
+export async function fetchArchiveProviderHtml(
+  url: string,
+  externalSignal?: AbortSignal,
+): Promise<string | null> {
+  const { signal, cleanup } = createRequestSignal(
+    FETCH_TIMEOUT_MS * 2,
+    externalSignal,
+  );
+
+  try {
+    const archiveUrl = `https://archive.is/newest/${url}`;
+    const res1 = await fetch(archiveUrl, {
+      redirect: "manual",
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal,
+    });
+
+    if (res1.status !== 302 && !res1.ok) {
+      return null;
+    }
+
+    let finalUrl = archiveUrl;
+    if (res1.status === 302) {
+      const loc = res1.headers.get("location");
+      if (!loc) return null;
+      finalUrl = loc;
+    }
+
+    const res2 = await fetch(finalUrl, {
+      redirect: "manual",
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal,
+    });
+
+    if (!res2.ok) {
+      return null;
+    }
+
+    const html = await res2.text();
+    if (
+      html.includes("Please complete the security check to access") ||
+      html.includes("g-recaptcha") ||
+      html.includes("No results")
+    ) {
+      return null;
+    }
+
+    return html;
   } catch (error) {
     if (externalSignal?.aborted || isCancellationError(error)) {
       throw new Error("Extraction cancelled by user");
@@ -487,6 +557,54 @@ export async function crawlCheerioDocs(
             mediumExtracted.articleBodyText.length > 160
           ) {
             extracted = mediumExtracted;
+          }
+        }
+      }
+
+      const stillBlocked2 = extracted ? looksLikeBlockedPage(extracted) : false;
+
+      if (!extracted || stillBlocked2) {
+        await options?.onProgress?.({
+          step: "page-start",
+          url: currentUrl,
+          crawledPages: pages.length,
+          queueLength: queue.length,
+          maxPages,
+          message: `Mencari snapshot Archive.is untuk: ${currentUrl}`,
+        });
+        const archiveHtml = await fetchArchiveProviderHtml(
+          currentUrl,
+          options?.signal,
+        );
+
+        if (archiveHtml) {
+          let archiveExtracted = extractPageFromHtml(
+            currentUrl,
+            archiveHtml,
+            scopedRootUrl,
+            cheerio.load,
+          );
+
+          if (!looksLikeBlockedPage(archiveExtracted)) {
+            const jsdomArchive = extractPageWithJsdomFallback(
+              currentUrl,
+              archiveHtml,
+              scopedRootUrl,
+            );
+            if (
+              jsdomArchive &&
+              jsdomArchive.articleBodyText.length >
+                archiveExtracted.articleBodyText.length
+            ) {
+              archiveExtracted = jsdomArchive;
+            }
+          }
+
+          if (
+            !looksLikeBlockedPage(archiveExtracted) &&
+            archiveExtracted.articleBodyText.length > 160
+          ) {
+            extracted = archiveExtracted;
           }
         }
       }

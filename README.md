@@ -21,7 +21,9 @@ Proyek ini fokus ke:
 - ⚡ **Extract Cache**: request URL yang sama bisa dilayani dari cache runtime
 - 🚦 **Rate Limit User**: mencegah spam command agar bot tetap stabil
 - 🧹 **Remote Cleanup**: bersihkan cache/chat/output langsung dari Telegram
-- 🛡️ **Fallback Browser Playwright**: bantu bypass halaman challenge/CAPTCHA (dengan cookie valid)
+- 🐼 **Lightpanda Support**: engine browser performa tinggi (CDP based) untuk ekstraksi super cepat
+- 🛡️ **Auto-Bypass Anti-Bot**: otomatis mencari snapshot **Archive.is** jika halaman utama di-blokir (Cloudflare/CAPTCHA/Paywall)
+- 🧠 **Multi-Engine Parsing**: `Cheerio` (utama) → `JSDOM + Readability` (fallback lokal) → rendered/browser fallback → Archive.is fallback
 
 ## 🧱 Arsitektur Singkat
 
@@ -138,6 +140,7 @@ bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
 - `/extract <url> [maxPages]` → extract website
 - `/archive <url> [maxPages]` → extract URL biasa atau link archive (archive.is/archive.today/archive.ph)
 - `/scribd <url-scribd>` → extract Scribd 1 halaman
+- `/bloomberg <url-bloomberg>` → extract Bloomberg 1 halaman (auto browser fallback)
 - `/subtitle <url-youtube>` → pilih bahasa subtitle via tombol
 - `/mark <url>` atau `/md <url>` → convert URL ke Markdown
 - `/runs [limit]` → lihat riwayat run
@@ -188,14 +191,15 @@ Tip:
 
 ### Cookie & anti-bot
 
-| Variable                   | Default | Fungsi                            |
-| -------------------------- | ------- | --------------------------------- |
-| `EXTRACT_COOKIE`           | `""`    | Cookie global untuk semua domain  |
-| `EXTRACT_COOKIE_MAP`       | `""`    | Cookie per domain (JSON string)   |
-| `EXTRACT_BROWSER_FALLBACK` | `0`     | Aktifkan browser fallback         |
-| `EXTRACT_BROWSER_FORCE`    | `0`     | Paksa browser fallback sejak awal |
-| `EXTRACT_BROWSER_HEADLESS` | `1`     | `0` untuk mode visible            |
-| `EXTRACT_BROWSER_WAIT_MS`  | `90000` | Waktu tunggu challenge/CAPTCHA    |
+| Variable                   | Default    | Fungsi                                    |
+| -------------------------- | ---------- | ----------------------------------------- |
+| `EXTRACT_COOKIE`           | `""`       | Cookie global untuk semua domain          |
+| `EXTRACT_COOKIE_MAP`       | `""`       | Cookie per domain (JSON string)           |
+| `EXTRACT_BROWSER_FALLBACK` | `0`        | Aktifkan browser fallback                 |
+| `EXTRACT_BROWSER_ENGINE`   | `chromium` | Browser engine: `chromium` / `lightpanda` |
+| `EXTRACT_BROWSER_FORCE`    | `0`        | Paksa browser fallback sejak awal         |
+| `EXTRACT_BROWSER_HEADLESS` | `1`        | `0` untuk mode visible                    |
+| `EXTRACT_BROWSER_WAIT_MS`  | `90000`    | Waktu tunggu challenge/CAPTCHA            |
 
 Contoh `EXTRACT_COOKIE_MAP`:
 
@@ -243,6 +247,9 @@ output/
 ## ⚙️ Optimasi Performa & Memory yang Sudah Aktif
 
 - 🚦 Pembatasan antrean link crawler agar tidak menumpuk URL berlebih
+- 🛡️ **Deteksi Blokir Cerdas**: mengenali halaman "Are you a robot" / Captcha / unusual activity secara real-time
+- 🐼 **Lightpanda Integration**: opsi engine browser super cepat tanpa overhead Playwright/Chromium penuh
+- ⚡ **Auto-Bypass Archive.is**: otomatis mencoba mengambil konten dari snapshot Archive jika web target memblokir crawler, dilengkapi dengan JSDOM-Readability fallback untuk hasil yang bersih
 - 🪶 Response extract bisa mode ringan (`pages` tidak dibawa ke caller)
 - 🧵 Queue job per chat agar job berat tidak saling tabrak
 - 🛑 Cancel job (best effort) + clear antrian per chat lewat `/cancel`

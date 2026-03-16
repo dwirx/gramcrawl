@@ -545,6 +545,10 @@ function buildHelpMessage(): string {
     "• /scribd <url-scribd>",
     "  Shortcut extract 1 halaman khusus Scribd.",
     "  Bot akan kirim TXT + DOCX + PDF jika konten terbaca.",
+    "• /bloomberg <url-bloomberg>",
+    "  Shortcut extract 1 halaman khusus Bloomberg (auto browser fallback).",
+    "• /lightpanda <url>",
+    "  Extract cepat menggunakan engine Lightpanda (high performance).",
     "• /subtitle <url>",
     "  Ambil subtitle YouTube (tombol ⚡ Auto Terbaik + pilih bahasa).",
     "• /mark <url>",
@@ -608,6 +612,14 @@ function buildTelegramCommandSuggestions(): TelegramBotCommand[] {
     {
       command: "scribd",
       description: "Extract cepat Scribd: /scribd <url-scribd>",
+    },
+    {
+      command: "bloomberg",
+      description: "Extract Bloomberg: /bloomberg <url-bloomberg>",
+    },
+    {
+      command: "lightpanda",
+      description: "Extract via Lightpanda: /lightpanda <url>",
     },
     {
       command: "subtitle",
@@ -2906,19 +2918,22 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
             continue;
           }
 
-          if (command.kind === "extract") {
+          if (
+            command.kind === "extract" ||
+            command.kind === "bloomberg" ||
+            command.kind === "lightpanda"
+          ) {
+            const maxPages =
+              command.kind === "bloomberg" || command.kind === "lightpanda"
+                ? 1
+                : command.maxPages;
             const queuedExtractJob = enqueueChatJob(
               chatId,
-              `extract:${command.url}`,
+              `${command.kind}:${command.url}`,
               async (cancelToken) => {
-                const cacheKey = buildExtractCacheKey(
-                  command.url,
-                  command.maxPages,
-                );
+                const cacheKey = buildExtractCacheKey(command.url, maxPages);
                 const extractStartedAt = Date.now();
-                const extractTimeoutMs = resolveExtractJobTimeoutMs(
-                  command.maxPages,
-                );
+                const extractTimeoutMs = resolveExtractJobTimeoutMs(maxPages);
                 const timedCancel = createTimedAbortSignal(
                   extractTimeoutMs,
                   cancelToken.signal,
@@ -2928,6 +2943,41 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                 let liveStatusText = "";
                 let lastProgressAt = Date.now();
                 let heartbeatBusy = false;
+
+                const isLightpandaCmd = command.kind === "lightpanda";
+                const prevEngine = process.env.EXTRACT_BROWSER_ENGINE;
+                const prevForce = process.env.EXTRACT_BROWSER_FORCE;
+                const prevFallback = process.env.EXTRACT_BROWSER_FALLBACK;
+
+                const setupEngine = (): void => {
+                  if (isLightpandaCmd) {
+                    process.env.EXTRACT_BROWSER_ENGINE = "lightpanda";
+                    process.env.EXTRACT_BROWSER_FORCE = "1";
+                    process.env.EXTRACT_BROWSER_FALLBACK = "1";
+                  }
+                };
+
+                const restoreEngine = (): void => {
+                  if (isLightpandaCmd) {
+                    if (prevEngine === undefined) {
+                      delete process.env.EXTRACT_BROWSER_ENGINE;
+                    } else {
+                      process.env.EXTRACT_BROWSER_ENGINE = prevEngine;
+                    }
+
+                    if (prevForce === undefined) {
+                      delete process.env.EXTRACT_BROWSER_FORCE;
+                    } else {
+                      process.env.EXTRACT_BROWSER_FORCE = prevForce;
+                    }
+
+                    if (prevFallback === undefined) {
+                      delete process.env.EXTRACT_BROWSER_FALLBACK;
+                    } else {
+                      process.env.EXTRACT_BROWSER_FALLBACK = prevFallback;
+                    }
+                  }
+                };
 
                 const safeStatusUpdate = async (
                   messageId: number,
@@ -2962,12 +3012,12 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   chatId,
                   buildStatusCard("⏳ [1/5] Memulai extract", [
                     { label: "URL", value: command.url },
-                    { label: "Maks halaman", value: command.maxPages },
+                    { label: "Maks halaman", value: maxPages },
                   ]),
                 );
                 liveStatusText = buildStatusCard("⏳ [1/5] Memulai extract", [
                   { label: "URL", value: command.url },
-                  { label: "Maks halaman", value: command.maxPages },
+                  { label: "Maks halaman", value: maxPages },
                 ]);
 
                 const heartbeat = setInterval(async () => {
@@ -3091,15 +3141,16 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   await logger.info("extract started", {
                     chatId,
                     url: command.url,
-                    maxPages: command.maxPages,
+                    maxPages: maxPages,
                   });
 
                   let extraction;
                   try {
+                    setupEngine();
                     extraction = await runExtraction(
                       {
                         rootUrl: command.url,
-                        maxPages: command.maxPages,
+                        maxPages: maxPages,
                         outputRoot: config.outputRoot,
                       },
                       {
@@ -3158,12 +3209,14 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                       await logger.warn("extract timeout", {
                         chatId,
                         url: command.url,
-                        maxPages: command.maxPages,
+                        maxPages: maxPages,
                         timeoutMs: extractTimeoutMs,
                       });
                       return;
                     }
                     throw error;
+                  } finally {
+                    restoreEngine();
                   }
 
                   if (cancelToken.isCancelled()) {
@@ -3177,7 +3230,7 @@ export async function startTelegramBot(configInput: BotConfig): Promise<void> {
                   extractCache.set(cacheKey, {
                     key: cacheKey,
                     rootUrl: command.url,
-                    maxPages: command.maxPages,
+                    maxPages: maxPages,
                     createdAt: Date.now(),
                     expiresAt: Date.now() + extractCacheTtlMs,
                     extraction: {
