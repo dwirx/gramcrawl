@@ -26,6 +26,11 @@ cookies.txt
 .env.production.local
 .env.local
 
+# editor swap/backup files
+*.swp
+*.swo
+*~
+
 # caches
 .eslintcache
 .cache
