@@ -231,7 +231,7 @@ async function fetchLightpandaHtml(
     await runWithTimeoutAndSignal(
       () =>
         page.goto(url, {
-          waitUntil: "domcontentloaded",
+          waitUntil: "networkidle",
           timeout: 45_000,
         }),
       55_000,
@@ -341,7 +341,7 @@ export async function fetchBrowserFallbackHtml(
     await runWithTimeoutAndSignal(
       () =>
         page.goto(url, {
-          waitUntil: "domcontentloaded",
+          waitUntil: "networkidle",
           timeout: 45_000,
         }),
       55_000,

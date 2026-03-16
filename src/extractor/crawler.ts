@@ -28,7 +28,16 @@ export type CrawlOptions = {
   signal?: AbortSignal;
 };
 
-const AUTO_BROWSER_FALLBACK_HOSTS = ["nytimes.com", "bloomberg.com"];
+const AUTO_BROWSER_FALLBACK_HOSTS = [
+  "nytimes.com",
+  "bloomberg.com",
+  "projectmultatuli.org",
+  "theatlantic.com",
+  "wsj.com",
+  "economist.com",
+  "newyorker.com",
+  "hbr.org",
+];
 const QUEUE_LIMIT_MULTIPLIER = 25;
 const MIN_QUEUE_LIMIT = 60;
 const MAX_LINKS_SCANNED_PER_PAGE = 400;
@@ -208,9 +217,7 @@ function looksLikeBlockedPage(
     "are you a robot",
     "unusual activity",
     "access denied",
-    "forbidden",
     "captcha",
-    "cloudflare",
   ];
 
   return markers.some((marker) => combined.includes(marker));
