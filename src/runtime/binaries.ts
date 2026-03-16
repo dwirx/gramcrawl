@@ -67,12 +67,28 @@ async function installPlaywrightChromium(): Promise<void> {
   }
 }
 
+async function isLightpandaReady(): Promise<boolean> {
+  try {
+    const bunCmd = process.platform === "win32" ? "bun.cmd" : "bun";
+    const result = await runCommand(bunCmd, ["x", "lightpanda", "--version"], 10_000);
+    return result.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function setupRuntimeBinaries(): Promise<void> {
   const logger = createLogger("runtime-setup");
   await logger.info("checking runtime binaries");
 
   const ytDlpBinary = await ensureYtDlpReady();
   await logger.info("yt-dlp ready", { binary: ytDlpBinary });
+
+  if (await isLightpandaReady()) {
+    await logger.info("lightpanda engine ready");
+  } else {
+    await logger.warn("lightpanda binary not found or not working. Make sure '@lightpanda/browser' is installed.");
+  }
 
   if (await isPlaywrightChromiumReady()) {
     await logger.info("playwright chromium ready");

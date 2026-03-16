@@ -111,6 +111,7 @@ function looksLikeChallengePage(html: string): boolean {
     "security verification",
     "verify you are not a bot",
     "enable javascript and cookies to continue",
+    "checking your browser",
     "turnstile",
     "captcha",
   ];
@@ -198,24 +199,61 @@ async function fetchLightpandaHtml(
   url: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  let lightpanda: typeof import("@lightpanda/browser").lightpanda;
+  let lightpandaModule: typeof import("@lightpanda/browser");
+  let playwrightModule: typeof import("playwright");
   try {
-    const module = await import("@lightpanda/browser");
-    lightpanda = module.lightpanda;
+    lightpandaModule = await import("@lightpanda/browser");
+    playwrightModule = await import("playwright");
   } catch {
     return null;
   }
 
-  return await runWithTimeoutAndSignal(
-    async () => {
-      const result = await lightpanda.fetch(url, {
-        dumpOptions: { type: "html" },
-      });
-      return typeof result === "string" ? result : result.toString();
-    },
-    BROWSER_LAUNCH_TIMEOUT_MS,
-    signal,
-  ).catch(() => null);
+  const port = 9222 + Math.floor(Math.random() * 100);
+  let proc: import("node:child_process").ChildProcessWithoutNullStreams | null =
+    null;
+
+  try {
+    proc = await lightpandaModule.lightpanda.serve({ port });
+
+    // Wait for CDP server to be ready
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const browser = await runWithTimeoutAndSignal(
+      () =>
+        playwrightModule.chromium.connectOverCDP(`http://127.0.0.1:${port}`),
+      BROWSER_LAUNCH_TIMEOUT_MS,
+      signal,
+    );
+
+    const context = browser.contexts()[0] || (await browser.newContext());
+    const page = await context.newPage();
+
+    await runWithTimeoutAndSignal(
+      () =>
+        page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 45_000,
+        }),
+      55_000,
+      signal,
+    );
+
+    const html = await runWithTimeoutAndSignal(
+      () => page.content(),
+      BROWSER_STEP_TIMEOUT_MS,
+      signal,
+    );
+
+    await browser.close();
+    return html;
+  } catch (error) {
+    console.error("Lightpanda error:", error);
+    return null;
+  } finally {
+    if (proc) {
+      proc.kill();
+    }
+  }
 }
 
 export async function fetchBrowserFallbackHtml(
@@ -234,7 +272,11 @@ export async function fetchBrowserFallbackHtml(
   const engine = getBrowserEngine();
 
   if (engine === "lightpanda") {
-    return await fetchLightpandaHtml(url, signal);
+    const html = await fetchLightpandaHtml(url, signal);
+    if (html && !looksLikeChallengePage(html)) {
+      return html;
+    }
+    // Fallback to chromium if lightpanda failed or hit challenge
   }
 
   let playwrightModule: typeof import("playwright");
