@@ -140,7 +140,7 @@ bun run src/cli.ts subtitle "https://www.youtube.com/watch?v=xxxx" --lang en
 - `/extract <url> [maxPages]` → extract website
 - `/archive <url> [maxPages]` → extract URL biasa atau link archive (archive.is/archive.today/archive.ph)
 - `/scribd <url-scribd>` → extract Scribd 1 halaman
-- `/bloomberg <url-bloomberg>` → extract Bloomberg 1 halaman (auto browser fallback)
+- `/force <url>` → extract 1 halaman dengan memaksa browser fallback (untuk bypass Cloudflare/Captcha). Alias: `/bloomberg`, `/nytimes`, `/wsj`, `/medium`
 - `/subtitle <url-youtube>` → pilih bahasa subtitle via tombol
 - `/mark <url>` atau `/md <url>` → convert URL ke Markdown
 - `/runs [limit]` → lihat riwayat run

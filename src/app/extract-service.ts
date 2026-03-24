@@ -5,7 +5,7 @@ import {
   buildArticleText,
   slugifyTitle,
 } from "../extractor/markdown";
-import type { ExtractionResult } from "../extractor/types";
+import type { ExtractionResult, BrowserEngine } from "../extractor/types";
 import {
   buildSiteFolderName,
   buildRunId,
@@ -35,6 +35,7 @@ export type ExtractOptions = {
   includePagesInResponse?: boolean;
   shouldCancel?: () => boolean;
   signal?: AbortSignal;
+  browserEngine?: BrowserEngine;
 };
 
 export type ExtractResponse = {
@@ -312,6 +313,7 @@ export async function runExtraction(
   const result = await crawlCheerioDocs(request.rootUrl, request.maxPages, {
     shouldCancel: options?.shouldCancel,
     signal: options?.signal,
+    browserEngine: options?.browserEngine,
     onProgress: async (progress) => {
       const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
       await report(

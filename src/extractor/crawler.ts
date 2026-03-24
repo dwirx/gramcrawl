@@ -11,7 +11,8 @@ import {
   fetchRenderedFallbackArticle,
   type RenderedFallbackArticle,
 } from "./rendered-fallback";
-import type { ExtractionResult, ExtractedPage } from "./types";
+import type { ExtractionResult, ExtractedPage, BrowserEngine } from "./types";
+import { normalizeExtractionUrl } from "./url-utils";
 
 export type CrawlProgress = {
   step: "page-start" | "page-done" | "page-failed";
@@ -26,6 +27,7 @@ export type CrawlOptions = {
   onProgress?: (progress: CrawlProgress) => Promise<void> | void;
   shouldCancel?: () => boolean;
   signal?: AbortSignal;
+  browserEngine?: BrowserEngine;
 };
 
 const AUTO_BROWSER_FALLBACK_HOSTS = [
@@ -37,6 +39,20 @@ const AUTO_BROWSER_FALLBACK_HOSTS = [
   "economist.com",
   "newyorker.com",
   "hbr.org",
+  "medium.com",
+  "ft.com",
+  "wired.com",
+  "scmp.com",
+  "theguardian.com",
+  "reuters.com",
+  "forbes.com",
+  "businessinsider.com",
+  "nikkei.com",
+  "asia.nikkei.com",
+  "vogue.com",
+  "fortune.com",
+  "foreignpolicy.com",
+  "barrons.com",
 ];
 const QUEUE_LIMIT_MULTIPLIER = 25;
 const MIN_QUEUE_LIMIT = 60;
@@ -217,7 +233,12 @@ function looksLikeBlockedPage(
     "are you a robot",
     "unusual activity",
     "access denied",
+    "access forbidden",
+    "forbidden",
     "captcha",
+    "page not found",
+    "404",
+    "attention required",
   ];
 
   return markers.some((marker) => combined.includes(marker));
@@ -385,9 +406,10 @@ export async function crawlCheerioDocs(
   maxPages: number,
   options?: CrawlOptions,
 ): Promise<ExtractionResult> {
-  const archiveOriginalRootUrl = extractArchiveOriginalUrl(rootUrl);
+  const normalizedRootUrl = normalizeExtractionUrl(rootUrl);
+  const archiveOriginalRootUrl = extractArchiveOriginalUrl(normalizedRootUrl);
   const disableQueueForArchiveSnapshot = Boolean(archiveOriginalRootUrl);
-  const scopedRootUrl = new URL(rootUrl);
+  const scopedRootUrl = new URL(normalizedRootUrl);
   const queueLimit = Math.max(
     maxPages * QUEUE_LIMIT_MULTIPLIER,
     MIN_QUEUE_LIMIT,
@@ -438,6 +460,7 @@ export async function crawlCheerioDocs(
         const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
           force: true,
           signal: options?.signal,
+          engine: options?.browserEngine,
         });
 
         if (browserHtml) {
@@ -635,6 +658,7 @@ export async function crawlCheerioDocs(
         const browserHtml = await fetchBrowserFallbackHtml(currentUrl, {
           force: browserForce,
           signal: options?.signal,
+          engine: options?.browserEngine,
         });
 
         if (browserHtml) {

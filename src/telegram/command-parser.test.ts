@@ -184,6 +184,34 @@ describe("parseTelegramCommand", () => {
     expect(parsed.maxPages).toBe(1);
   });
 
+  test("parses first URL from free-form text as extract command", () => {
+    const parsed = parseTelegramCommand(
+      "Tolong extract ini ya: https://example.com/article?ref=abc.",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.url).toBe("https://example.com/article?ref=abc");
+    expect(parsed.maxPages).toBe(1);
+  });
+
+  test("parses /extract command when URL is not in second token", () => {
+    const parsed = parseTelegramCommand(
+      "/extract tolong proses https://example.com/article?x=1",
+    );
+
+    expect(parsed.kind).toBe("extract");
+    if (parsed.kind !== "extract") {
+      throw new Error("Expected extract command");
+    }
+
+    expect(parsed.url).toBe("https://example.com/article?x=1");
+    expect(parsed.maxPages).toBe(1);
+  });
+
   test("caps /extract maxPages for safety", () => {
     const parsed = parseTelegramCommand(
       "/extract https://example.com/article 999",

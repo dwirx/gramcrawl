@@ -1,4 +1,5 @@
-import type { BrowserContext } from "playwright";
+import type { BrowserContext, Page, Browser } from "playwright";
+import type { BrowserEngine } from "./types";
 
 function shouldEnableBrowserFallback(): boolean {
   return process.env.EXTRACT_BROWSER_FALLBACK === "1";
@@ -12,7 +13,7 @@ function isHeadless(): boolean {
   return process.env.EXTRACT_BROWSER_HEADLESS !== "0";
 }
 
-function getBrowserEngine(): "chromium" | "lightpanda" {
+function getBrowserEngine(): BrowserEngine {
   const engine = (process.env.EXTRACT_BROWSER_ENGINE ?? "chromium")
     .trim()
     .toLowerCase();
@@ -30,8 +31,9 @@ function getWaitTimeoutMs(): number {
 }
 
 const BROWSER_LAUNCH_TIMEOUT_MS = 45_000;
-const BROWSER_STEP_TIMEOUT_MS = 12_000;
+const BROWSER_STEP_TIMEOUT_MS = 15_000;
 const BROWSER_CLOSE_TIMEOUT_MS = 8_000;
+const LIGHTPANDA_CDP_READY_DELAY_MS = 2_500;
 
 function isCancellationError(error: unknown): boolean {
   if (error instanceof Error) {
@@ -99,6 +101,17 @@ async function closeContextSafely(context: BrowserContext | null) {
   ).catch(() => {});
 }
 
+async function closeBrowserSafely(browser: Browser | null) {
+  if (!browser) {
+    return;
+  }
+
+  await runWithTimeoutAndSignal(
+    () => browser.close(),
+    BROWSER_CLOSE_TIMEOUT_MS,
+  ).catch(() => {});
+}
+
 function toUserDataDir(hostname: string): string {
   const safe = hostname.toLowerCase().replaceAll(/[^a-z0-9.-]/g, "-");
   return `.cache/browser-profile/${safe}`;
@@ -114,6 +127,11 @@ function looksLikeChallengePage(html: string): boolean {
     "checking your browser",
     "turnstile",
     "captcha",
+    "attention required",
+    "one more step",
+    "access denied",
+    "access forbidden",
+    "forbidden",
   ];
 
   return markers.some((marker) => lowered.includes(marker));
@@ -145,25 +163,20 @@ function readCookieOverride(url: string): string {
   }
 }
 
-function parseCookieHeaderToBrowserCookies(
-  cookieHeader: string,
-  hostname: string,
-): Array<{
+type PlaywrightCookie = {
   name: string;
   value: string;
   domain: string;
   path: string;
   secure: boolean;
-  sameSite: "None";
-}> {
-  const cookies: Array<{
-    name: string;
-    value: string;
-    domain: string;
-    path: string;
-    secure: boolean;
-    sameSite: "None";
-  }> = [];
+  sameSite: "None" | "Lax" | "Strict";
+};
+
+function parseCookieHeaderToBrowserCookies(
+  cookieHeader: string,
+  hostname: string,
+): PlaywrightCookie[] {
+  const cookies: PlaywrightCookie[] = [];
 
   for (const part of cookieHeader.split(";")) {
     const trimmed = part.trim();
@@ -208,17 +221,26 @@ async function fetchLightpandaHtml(
     return null;
   }
 
-  const port = 9222 + Math.floor(Math.random() * 100);
+  const port = 9222 + Math.floor(Math.random() * 200);
   let proc: import("node:child_process").ChildProcessWithoutNullStreams | null =
     null;
+  let browser: Browser | null = null;
+  const parsed = new URL(url);
 
   try {
-    proc = await lightpandaModule.lightpanda.serve({ port });
+    // 1. Launch Lightpanda CDP Server
+    proc = await lightpandaModule.lightpanda.serve({
+      port,
+    });
 
     // Wait for CDP server to be ready
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) =>
+      setTimeout(resolve, LIGHTPANDA_CDP_READY_DELAY_MS),
+    );
 
-    const browser = await runWithTimeoutAndSignal(
+    // 2. Connect via Playwright (or puppeteer-core as per docs)
+    // We use Playwright because the project already uses it.
+    browser = await runWithTimeoutAndSignal(
       () =>
         playwrightModule.chromium.connectOverCDP(`http://127.0.0.1:${port}`),
       BROWSER_LAUNCH_TIMEOUT_MS,
@@ -226,32 +248,69 @@ async function fetchLightpandaHtml(
     );
 
     const context = browser.contexts()[0] || (await browser.newContext());
-    const page = await context.newPage();
 
+    // 3. Set Cookies if any
+    const cookieHeader = readCookieOverride(url);
+    if (cookieHeader) {
+      const cookies = parseCookieHeaderToBrowserCookies(
+        cookieHeader,
+        parsed.hostname,
+      );
+      if (cookies.length > 0) {
+        await context.addCookies(cookies);
+      }
+    }
+
+    const page = context.pages()[0] || (await context.newPage());
+
+    // 4. Navigate
     await runWithTimeoutAndSignal(
       () =>
         page.goto(url, {
           waitUntil: "networkidle",
-          timeout: 45_000,
+          timeout: 60_000,
         }),
-      55_000,
+      70_000,
       signal,
     );
 
-    const html = await runWithTimeoutAndSignal(
+    const waitTimeoutMs = getWaitTimeoutMs();
+    const startedAt = Date.now();
+    let html = await runWithTimeoutAndSignal(
       () => page.content(),
       BROWSER_STEP_TIMEOUT_MS,
       signal,
     );
 
-    await browser.close();
+    // Lightpanda is fast, but Bloomberg might need extra time if it has challenges
+    while (
+      looksLikeChallengePage(html) &&
+      Date.now() - startedAt < waitTimeoutMs
+    ) {
+      await runWithTimeoutAndSignal(
+        () => page.waitForTimeout(2_000),
+        BROWSER_STEP_TIMEOUT_MS,
+        signal,
+      );
+      html = await runWithTimeoutAndSignal(
+        () => page.content(),
+        BROWSER_STEP_TIMEOUT_MS,
+        signal,
+      );
+    }
+
     return html;
   } catch (error) {
-    console.error("Lightpanda error:", error);
+    if (signal?.aborted) {
+      throw new Error("Extraction cancelled by user");
+    }
     return null;
   } finally {
+    if (browser) {
+      await closeBrowserSafely(browser);
+    }
     if (proc) {
-      proc.kill();
+      proc.kill("SIGKILL");
     }
   }
 }
@@ -261,6 +320,7 @@ export async function fetchBrowserFallbackHtml(
   options?: {
     force?: boolean;
     signal?: AbortSignal;
+    engine?: BrowserEngine;
   },
 ): Promise<string | null> {
   const force = options?.force ?? false;
@@ -269,7 +329,7 @@ export async function fetchBrowserFallbackHtml(
     return null;
   }
 
-  const engine = getBrowserEngine();
+  const engine = options?.engine ?? getBrowserEngine();
 
   if (engine === "lightpanda") {
     const html = await fetchLightpandaHtml(url, signal);
@@ -299,6 +359,8 @@ export async function fetchBrowserFallbackHtml(
         playwrightModule.chromium.launchPersistentContext(userDataDir, {
           headless,
           viewport: { width: 1366, height: 900 },
+          userAgent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         }),
       BROWSER_LAUNCH_TIMEOUT_MS,
       signal,

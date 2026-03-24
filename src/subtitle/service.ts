@@ -684,6 +684,22 @@ async function runYtDlpWithBinary(
   });
 }
 
+function buildCommonYtDlpArgs(): string[] {
+  const args: string[] = [];
+
+  const cookiesPath = process.env.EXTRACT_YT_DLP_COOKIES;
+  if (cookiesPath) {
+    args.push("--cookies", cookiesPath);
+  }
+
+  const cookiesBrowser = process.env.EXTRACT_YT_DLP_COOKIES_BROWSER;
+  if (cookiesBrowser) {
+    args.push("--cookies-from-browser", cookiesBrowser);
+  }
+
+  return args;
+}
+
 function parseLanguages(meta: YtDlpMetadata): SubtitleLanguage[] {
   const manual = new Set(Object.keys(meta.subtitles ?? {}));
   const auto = new Set(Object.keys(meta.automatic_captions ?? {}));
@@ -815,10 +831,14 @@ export function resolveOriginalLanguage(
 export async function listAvailableSubtitles(
   url: string,
 ): Promise<SubtitleListResult> {
-  const result = await runYtDlp(
-    ["--skip-download", "--dump-single-json", "--no-warnings", url],
-    LIST_TIMEOUT_MS,
-  );
+  const args = [
+    "--skip-download",
+    "--dump-single-json",
+    "--no-warnings",
+    ...buildCommonYtDlpArgs(),
+    url,
+  ];
+  const result = await runYtDlp(args, LIST_TIMEOUT_MS);
 
   if (result.code !== 0) {
     throw new Error(
@@ -884,6 +904,7 @@ async function downloadFormat(
     `${baseSlug}.%(ext)s`,
     "--no-warnings",
     "--restrict-filenames",
+    ...buildCommonYtDlpArgs(),
     url,
   ];
 

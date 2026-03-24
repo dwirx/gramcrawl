@@ -7,12 +7,14 @@ const DEFAULT_EXTRACT_MAX_PAGES = 1;
 const MAX_EXTRACT_MAX_PAGES = 30;
 const DEFAULT_CLEAR_CHAT_LIMIT = 20;
 const MAX_CLEAR_CHAT_LIMIT = 100;
+const URL_IN_TEXT_PATTERN = /https?:\/\/[^\s<>"'`]+/giu;
 
 export type TelegramCommand =
   | { kind: "help" }
   | { kind: "runs"; limit: number }
   | { kind: "extract"; url: string; maxPages: number }
-  | { kind: "bloomberg"; url: string }
+  | { kind: "full"; url: string }
+  | { kind: "force"; url: string }
   | { kind: "lightpanda"; url: string }
   | { kind: "mark"; url: string }
   | { kind: "defuddle"; url: string }
@@ -66,6 +68,46 @@ function isScribdUrl(value: string): boolean {
   }
 }
 
+function trimTrailingPunctuation(rawUrl: string): string {
+  let value = rawUrl.trim();
+  const plainTrailing = new Set([",", ".", "!", "?", ";", ":"]);
+
+  while (value.length > 0) {
+    const last = value.at(-1) ?? "";
+
+    if (plainTrailing.has(last)) {
+      value = value.slice(0, -1);
+      continue;
+    }
+
+    if (last === ")" || last === "]" || last === "}") {
+      const open = last === ")" ? "(" : last === "]" ? "[" : "{";
+      const openCount = value.split(open).length - 1;
+      const closeCount = value.split(last).length - 1;
+      if (closeCount > openCount) {
+        value = value.slice(0, -1);
+        continue;
+      }
+    }
+
+    break;
+  }
+
+  return value;
+}
+
+function extractFirstUrlFromText(input: string): string | null {
+  for (const match of input.matchAll(URL_IN_TEXT_PATTERN)) {
+    const raw = match[0] ?? "";
+    const cleaned = trimTrailingPunctuation(raw);
+    if (cleaned && isUrl(cleaned)) {
+      return cleaned;
+    }
+  }
+
+  return null;
+}
+
 function normalizeCommandText(input: string): string {
   const token = input.trim().split(/\s+/)[0] ?? "";
   if (!token.startsWith("/")) {
@@ -80,6 +122,15 @@ function normalizeCommandText(input: string): string {
   const normalizedToken = token.slice(0, atIndex);
   const rest = input.trim().slice(token.length).trim();
   return rest ? `${normalizedToken} ${rest}` : normalizedToken;
+}
+
+function resolveCommandUrl(trimmed: string, parts: string[]): string | null {
+  const direct = parts[1]?.trim() ?? "";
+  if (direct && isUrl(direct)) {
+    return direct;
+  }
+
+  return extractFirstUrlFromText(trimmed);
 }
 
 export function parseTelegramCommand(text: string): TelegramCommand {
@@ -103,7 +154,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/extract") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -121,7 +172,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/archive") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -139,7 +190,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/scribd") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isScribdUrl(url)) {
       return { kind: "unknown" };
@@ -152,21 +203,40 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     };
   }
 
-  if (command === "/bloomberg") {
-    const url = parts[1];
+  if (command === "/full" || command === "/pdf" || command === "/docx") {
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
     }
 
     return {
-      kind: "bloomberg",
+      kind: "full",
+      url,
+    };
+  }
+
+  if (
+    command === "/force" ||
+    command === "/bloomberg" ||
+    command === "/nytimes" ||
+    command === "/wsj" ||
+    command === "/medium"
+  ) {
+    const url = resolveCommandUrl(trimmed, parts);
+
+    if (!url || !isUrl(url)) {
+      return { kind: "unknown" };
+    }
+
+    return {
+      kind: "force",
       url,
     };
   }
 
   if (command === "/lightpanda") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -196,7 +266,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/subtitle") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -209,7 +279,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/mark" || command === "/md") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -222,7 +292,7 @@ export function parseTelegramCommand(text: string): TelegramCommand {
   }
 
   if (command === "/defuddle" || command === "/df") {
-    const url = parts[1];
+    const url = resolveCommandUrl(trimmed, parts);
 
     if (!url || !isUrl(url)) {
       return { kind: "unknown" };
@@ -331,10 +401,15 @@ export function parseTelegramCommand(text: string): TelegramCommand {
     return { kind: "cleanDownloads", scope, site };
   }
 
-  if (isUrl(trimmed)) {
+  if (trimmed.startsWith("/")) {
+    return { kind: "unknown" };
+  }
+
+  const inferredUrl = extractFirstUrlFromText(trimmed);
+  if (inferredUrl) {
     return {
       kind: "extract",
-      url: trimmed,
+      url: inferredUrl,
       maxPages: 1,
     };
   }

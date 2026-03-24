@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
-import { buildSendFileNameForExtract } from "./bot";
+import { buildSendFileNameForExtract } from "./handlers/file-utils";
 
 describe("buildSendFileNameForExtract", () => {
   test("keeps original basename for non-latest files", async () => {

@@ -44,3 +44,5 @@ export type ExtractionResult = {
   collectedAt: string;
   pages: ExtractedPage[];
 };
+
+export type BrowserEngine = "chromium" | "lightpanda";
